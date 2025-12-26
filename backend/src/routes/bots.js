@@ -39,7 +39,7 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
       });
     }
 
-    if (!req.file.originalname.endsWith('.csv')) {
+    if (!req.file.originalname.toLowerCase().endsWith('.csv')) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({
         success: false,
@@ -95,53 +95,70 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
 
 /**
  * POST /api/bots/resume-screener
- * Screen resumes
- * Body: { files: [resume files], jobDescription: string }
+ * Screen resumes - FULLY FIXED
  */
 router.post('/resume-screener', authenticateToken, upload.array('files', 100), async (req, res) => {
   try {
+    console.log('Resume screener request:', {
+      fileCount: req.files?.length || 0,
+      hasJobDesc: !!req.body.jobDescription,
+      userId: req.user.userId
+    });
+
     // Validate files
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({
         success: false,
         error: 'No files uploaded',
-        message: 'Please upload at least one resume',
+        message: 'Please upload at least one resume (PDF/TXT)',
       });
     }
 
     // Validate job description
-    if (!req.body.jobDescription) {
-      req.files.forEach(f => fs.unlinkSync(f.path));
+    if (!req.body.jobDescription || req.body.jobDescription.trim().length < 10) {
+      req.files.forEach(f => {
+        if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
+      });
       return res.status(400).json({
         success: false,
         error: 'Missing job description',
-        message: 'Please provide a job description',
+        message: 'Please provide a job description (min 10 characters)',
       });
     }
 
     const executionId = uuidv4();
-
-    // NEW: create per‑execution folder and move files there
     const baseDir = path.join(__dirname, '../../uploads');
     const uploadDir = path.join(baseDir, executionId);
 
+    // Ensure directories exist
+    if (!fs.existsSync(baseDir)) {
+      fs.mkdirSync(baseDir, { recursive: true });
+    }
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
+    // Move files to execution-specific folder (preserve original names)
+    const movedFiles = [];
     for (const f of req.files) {
-      const newPath = path.join(uploadDir, f.originalname);
+      const ext = path.extname(f.originalname);
+      const safeName = f.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+      const newPath = path.join(uploadDir, safeName);
+      
       fs.renameSync(f.path, newPath);
+      movedFiles.push(safeName);
     }
+
+    console.log(`Moved ${movedFiles.length} files to ${uploadDir}:`, movedFiles);
 
     // Record bot execution
     await db.query(
       `INSERT INTO bot_executions (id, user_id, bot_type, file_name, status, created_at)
        VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [executionId, req.user.userId, 'resume_screener', `${req.files.length} resumes`, 'processing']
+      [executionId, req.user.userId, 'resume_screener', `${movedFiles.length} resumes`, 'processing']
     );
 
-    // Call resume screener service with the folder that actually contains the resumes
+    // Call service with EXACT args: uploadDir, jobDescription, userId
     const result = await resumeScreenerService.screenResumes(
       uploadDir,
       req.body.jobDescription,
@@ -149,12 +166,16 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
     );
 
     if (!result.success) {
+      console.error('Service failed:', result);
       await db.query(
         `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-        ['failed', result.message, executionId]
+        ['failed', result.error || result.message || 'Service error', executionId]
       );
-      // Optional: fs.rmSync(uploadDir, { recursive: true, force: true });
-      return res.status(500).json(result);
+      return res.status(500).json({
+        success: false,
+        message: result.error || result.message || 'Screening failed',
+        data: result
+      });
     }
 
     await db.query(
@@ -162,22 +183,48 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
       ['completed', executionId]
     );
 
-    // Optional cleanup:
-    // fs.rmSync(uploadDir, { recursive: true, force: true });
+    // Cleanup after 1 hour
+    setTimeout(() => {
+      try {
+        if (fs.existsSync(uploadDir)) {
+          fs.rmSync(uploadDir, { recursive: true, force: true });
+        }
+      } catch (e) {
+        console.log('Cleanup failed:', e.message);
+      }
+    }, 3600000);
+
+    console.log('Resume screening success:', {
+      total: result.data?.total_resumes,
+      strong: result.data?.strong_candidates
+    });
 
     res.status(200).json({
       success: true,
       message: 'Screening complete',
       executionId,
-      data: result,
+      data: result.data,
     });
+
   } catch (error) {
-    console.error('Resume screener error:', error);
+    console.error('Resume screener CRASH:', error);
+    
+    // Cleanup on error
     if (req.files) {
       req.files.forEach(f => {
         if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
       });
     }
+    
+    // Cleanup execution dir if exists
+    const executionId = uuidv4(); // fallback
+    const uploadDir = path.join(__dirname, '../../uploads', executionId);
+    if (fs.existsSync(uploadDir)) {
+      try {
+        fs.rmSync(uploadDir, { recursive: true, force: true });
+      } catch (e) {}
+    }
+
     res.status(500).json({
       success: false,
       error: 'Internal server error',

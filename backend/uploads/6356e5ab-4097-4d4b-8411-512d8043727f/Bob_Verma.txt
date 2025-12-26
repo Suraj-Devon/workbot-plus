@@ -1,0 +1,21 @@
+Bob Verma
+IT Support Engineer
+
+Summary
+IT support engineer with 3 years of experience resolving hardware and software issues, managing Windows servers, and helping users with day‑to‑day technical problems.
+
+Skills
+- Operating Systems: Windows, Linux (basic)
+- Networking: TCP/IP, DNS, DHCP
+- Tools: Active Directory, remote desktop tools, ticketing systems
+- Scripting: PowerShell basics
+- Soft skills: communication, customer service, problem solving
+
+Experience
+IT Support Engineer, HelpDesk Co. (2022 – Present)
+- Resolved 20+ support tickets per day related to laptops, printers, Wi‑Fi, and software.
+- Managed user accounts in Active Directory.
+- Documented common issues and solutions in the internal knowledge base.
+
+Education
+B.Sc in Information Technology, 2020

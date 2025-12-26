@@ -19,16 +19,25 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
       // Path to Python script
       const pythonScript = path.join(__dirname, '../../ai_workers/resume_screener_bot.py');
 
-      // Escape quotes in job description for shell
-      const escapedJobDesc = jobDescription.replace(/"/g, '\\"');
+      // Create temp files dir if needed
+      const tempDir = path.join(__dirname, '../../temp');
+      if (!require('fs').existsSync(tempDir)) {
+        require('fs').mkdirSync(tempDir, { recursive: true });
+      }
 
-      // Run Python script
+      // Escape quotes in job description for shell
+      const escapedJobDesc = jobDescription.replace(/"/g, '\\"').replace(/'/g, "\\'");
+
+      // FIXED: Match Python script args exactly: upload_dir, job_description, execution_id
       const command = `python "${pythonScript}" "${filesPath}" "${escapedJobDesc}" "${executionId}"`;
 
-      exec(command, { timeout: 120000 }, async (error, stdout, stderr) => {
+      console.log('Executing:', command); // DEBUG
+
+      exec(command, { timeout: 120000, cwd: path.dirname(pythonScript) }, async (error, stdout, stderr) => {
         try {
           if (error) {
-            console.error('Python error:', stderr);
+            console.error('Python error:', error.message);
+            console.error('Stderr:', stderr);
             return resolve({
               success: false,
               error: 'Screening failed',
@@ -36,8 +45,26 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
             });
           }
 
+          if (!stdout) {
+            return resolve({
+              success: false,
+              error: 'No output',
+              message: 'Python script returned empty output',
+            });
+          }
+
           // Parse Python output
-          const result = JSON.parse(stdout);
+          let result;
+          try {
+            result = JSON.parse(stdout.trim());
+          } catch (parseErr) {
+            console.error('Parse error:', parseErr, 'Raw output:', stdout);
+            return resolve({
+              success: false,
+              error: 'Invalid output format',
+              message: 'Python script returned invalid JSON',
+            });
+          }
 
           // Save to database
           await db.query(
@@ -46,13 +73,14 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
             [uuidv4(), executionId, result, result.summary || 'Screening complete']
           );
 
+          console.log('Screening success:', result); // DEBUG
           resolve({
             success: true,
             executionId,
             data: result,
           });
         } catch (err) {
-          console.error('Parse error:', err);
+          console.error('Service error:', err);
           resolve({
             success: false,
             error: 'Failed to process results',
@@ -71,6 +99,4 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
   });
 };
 
-module.exports = {
-  screenResumes,
-};
+module.exports = { screenResumes };

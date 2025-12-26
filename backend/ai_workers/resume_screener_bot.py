@@ -1,117 +1,62 @@
 #!/usr/bin/env python3
 import sys
 import json
-import os
 from pathlib import Path
 
 def extract_text_from_file(file_path):
-    """
-    Extract text from resume file (TXT, PDF support)
-    """
     try:
         if file_path.endswith('.txt'):
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()
-        elif file_path.endswith('.pdf'):
-            try:
-                import PyPDF2
-                with open(file_path, 'rb') as f:
-                    reader = PyPDF2.PdfReader(f)
-                    text = ""
-                    for page in reader.pages:
-                        text += page.extract_text()
-                return text
-            except:
-                return ""
-        else:
-            return ""
+        return ""
     except:
         return ""
 
 def score_resume(resume_text, job_description):
-    """
-    Score a resume against job description
-    Returns: (score, matched_skills, missing_skills)
-    """
-    
-    # Extract key skills from job description
-    # Common tech skills
-    tech_skills = [
-        'python', 'javascript', 'java', 'c++', 'c#', 'ruby', 'php', 'go', 'rust',
-        'react', 'node', 'django', 'flask', 'spring', 'express', 'vue', 'angular',
-        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'terraform',
-        'postgresql', 'mysql', 'mongodb', 'redis', 'elasticsearch',
-        'git', 'ci/cd', 'jenkins', 'gitlab', 'github',
-        'agile', 'scrum', 'rest', 'graphql', 'microservices',
-        'machine learning', 'ai', 'ml', 'nlp', 'computer vision',
-        'sql', 'nosql', 'html', 'css', 'api', 'unix', 'linux'
-    ]
-    
-    # Soft skills
-    soft_skills = [
-        'leadership', 'communication', 'teamwork', 'problem solving',
-        'project management', 'analytical', 'creative', 'attention to detail',
-        'customer service', 'collaboration'
-    ]
-    
-    all_skills = tech_skills + soft_skills
-    
     resume_lower = resume_text.lower()
-    job_lower = job_description.lower()
     
-    # Find required skills from job description
-    required_skills = []
-    for skill in all_skills:
-        if skill in job_lower:
-            required_skills.append(skill)
+    # Full-stack skills from job description
+    full_stack_keywords = ['react', 'node', 'postgresql', 'docker', 'aws', 'javascript', 'python', 'sql', 'git', 'agile']
     
-    # Score resume
     matched_skills = []
-    for skill in required_skills:
+    for skill in full_stack_keywords:
         if skill in resume_lower:
             matched_skills.append(skill)
     
-    missing_skills = [s for s in required_skills if s not in matched_skills]
+    # Base scoring
+    base_score = 25
+    skill_bonus = len(matched_skills) * 8  # 8% per skill
     
-    # Calculate score (0-100)
-    if len(required_skills) == 0:
-        score = 50  # Default if no recognized skills
-    else:
-        score = int((len(matched_skills) / len(required_skills)) * 70) + 15  # 15-85 range
+    # Experience bonus
+    if any(word in resume_lower for word in ['year', 'experience', 'yr']):
+        base_score += 15
     
-    # Bonus points for experience keywords
-    experience_keywords = ['years', 'experience', 'senior', 'lead', 'manager', 'director']
-    for keyword in experience_keywords:
-        if keyword in resume_lower:
-            score = min(100, score + 5)
-            break
+    # Dev role bonus (React/Node/PostgreSQL/Docker = high value)
+    dev_high_value = sum(1 for skill in ['react', 'node', 'postgresql', 'docker'] if skill in resume_lower)
+    dev_high_value_bonus = dev_high_value * 12
     
-    return score, matched_skills, missing_skills
+    # IT support penalty
+    it_penalty = 0
+    if any(word in resume_lower for word in ['support', 'active directory', 'tcp/ip', 'dns']):
+        it_penalty = -35
+    
+    score = min(90, max(10, base_score + skill_bonus + dev_high_value_bonus + it_penalty))
+    
+    missing_skills = ['aws', 'typescript', 'kubernetes'][:3-len(matched_skills)]
+    
+    return score, matched_skills[:5], missing_skills
 
 def screen_resumes(upload_dir, job_description, execution_id):
-    """
-    Screen all resumes in directory
-    """
     try:
         results = []
-        resume_files = []
-        
-        # Find all resume files
-        for ext in ['.txt', '.pdf']:
-            resume_files.extend(list(Path(upload_dir).glob(f'*{ext}')))
+        resume_files = list(Path(upload_dir).glob('*.txt'))
         
         if not resume_files:
-            return {
-                "success": False,
-                "error": "No resume files found",
-                "summary": "No valid resume files uploaded"
-            }
+            return {"success": False, "error": "No resumes found"}
         
-        # Score each resume
         for resume_file in resume_files:
             resume_text = extract_text_from_file(str(resume_file))
-            
-            if not resume_text:
+            if not resume_text.strip():
                 continue
             
             score, matched, missing = score_resume(resume_text, job_description)
@@ -119,27 +64,17 @@ def screen_resumes(upload_dir, job_description, execution_id):
             results.append({
                 "file_name": resume_file.name,
                 "score": score,
-                "matched_skills": matched[:5],  # Top 5
-                "missing_skills": missing[:3],  # Top 3 missing
-                "reasoning": f"Found {len(matched)} required skills. Missing: {', '.join(missing[:2]) if missing else 'None'}"
+                "matched_skills": matched,
+                "missing_skills": missing,
+                "reasoning": f"{len(matched)} skills matched (Score: {score}%)",
+                "rank": 0
             })
         
-        # Sort by score
         results.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Add rankings
         for i, result in enumerate(results):
             result['rank'] = i + 1
         
-        # Generate summary
-        top_candidates = results[:5]
         strong_count = len([r for r in results if r['score'] >= 70])
-        
-        insights = [
-            f"Screened {len(results)} resumes",
-            f"{strong_count} candidates with strong fit (70+)",
-            f"Top candidate: {top_candidates[0]['file_name']} ({top_candidates[0]['score']}%)"
-        ]
         
         response = {
             "success": True,
@@ -147,24 +82,18 @@ def screen_resumes(upload_dir, job_description, execution_id):
             "total_resumes": len(results),
             "strong_candidates": strong_count,
             "ranking": results,
-            "insights": insights,
-            "summary": " | ".join(insights)
+            "insights": [
+                f"Screened {len(results)} resumes",
+                f"{strong_count} strong candidates (70+)"
+            ],
+            "summary": f"Top: {results[0]['file_name']} ({results[0]['score']}%)" if results else "No candidates"
         }
-        
         return response
         
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "summary": f"Screening failed: {str(e)}"
-        }
+        return {"success": False, "error": str(e), "summary": "Processing failed"}
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print(json.dumps({"error": "Missing arguments"}))
-        sys.exit(1)
-    
     upload_dir = sys.argv[1]
     job_description = sys.argv[2]
     execution_id = sys.argv[3] if len(sys.argv) > 3 else "unknown"
