@@ -28,12 +28,9 @@ const upload = multer({
 /**
  * POST /api/bots/data-analyst
  * Analyze CSV data
- * Body: { file: CSV file }
- * Headers: { Authorization: "Bearer <token>" }
  */
 router.post('/data-analyst', authenticateToken, upload.single('file'), async (req, res) => {
   try {
-    // Validate file
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -42,9 +39,8 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
       });
     }
 
-    // Validate CSV
     if (!req.file.originalname.endsWith('.csv')) {
-      fs.unlinkSync(req.file.path); // Delete uploaded file
+      fs.unlinkSync(req.file.path);
       return res.status(400).json({
         success: false,
         error: 'Invalid file type',
@@ -54,36 +50,28 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
 
     const executionId = uuidv4();
 
-    // Record bot execution in database
     await db.query(
       `INSERT INTO bot_executions (id, user_id, bot_type, file_name, file_size_bytes, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [executionId, req.user.userId, 'data_analyst', req.file.originalname, req.file.size, 'processing']
     );
 
-    // Call data analyst service
     const result = await dataAnalystService.analyzeData(req.file.path, req.user.userId);
 
     if (!result.success) {
-      // Update status to failed
       await db.query(
         `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
         ['failed', result.message, executionId]
       );
-
-      // Clean up file
       fs.unlinkSync(req.file.path);
-
       return res.status(500).json(result);
     }
 
-    // Update status to completed
     await db.query(
       `UPDATE bot_executions SET status = $1, completed_at = NOW() WHERE id = $2`,
       ['completed', executionId]
     );
 
-    // Clean up file
     fs.unlinkSync(req.file.path);
 
     res.status(200).json({
@@ -109,7 +97,6 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
  * POST /api/bots/resume-screener
  * Screen resumes
  * Body: { files: [resume files], jobDescription: string }
- * Headers: { Authorization: "Bearer <token>" }
  */
 router.post('/resume-screener', authenticateToken, upload.array('files', 100), async (req, res) => {
   try {
@@ -124,7 +111,6 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
 
     // Validate job description
     if (!req.body.jobDescription) {
-      // Clean up files
       req.files.forEach(f => fs.unlinkSync(f.path));
       return res.status(400).json({
         success: false,
@@ -134,16 +120,28 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
     }
 
     const executionId = uuidv4();
-    const uploadDir = path.dirname(req.files[0].path);
 
-    // Record bot execution in database
+    // NEW: create per‑execution folder and move files there
+    const baseDir = path.join(__dirname, '../../uploads');
+    const uploadDir = path.join(baseDir, executionId);
+
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    for (const f of req.files) {
+      const newPath = path.join(uploadDir, f.originalname);
+      fs.renameSync(f.path, newPath);
+    }
+
+    // Record bot execution
     await db.query(
       `INSERT INTO bot_executions (id, user_id, bot_type, file_name, status, created_at)
        VALUES ($1, $2, $3, $4, $5, NOW())`,
       [executionId, req.user.userId, 'resume_screener', `${req.files.length} resumes`, 'processing']
     );
 
-    // Call resume screener service
+    // Call resume screener service with the folder that actually contains the resumes
     const result = await resumeScreenerService.screenResumes(
       uploadDir,
       req.body.jobDescription,
@@ -151,36 +149,27 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
     );
 
     if (!result.success) {
-      // Update status to failed
       await db.query(
         `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
         ['failed', result.message, executionId]
       );
-
-      // Clean up files
-      req.files.forEach(f => {
-        if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
-      });
-
+      // Optional: fs.rmSync(uploadDir, { recursive: true, force: true });
       return res.status(500).json(result);
     }
 
-    // Update status to completed
     await db.query(
       `UPDATE bot_executions SET status = $1, completed_at = NOW() WHERE id = $2`,
       ['completed', executionId]
     );
 
-    // Clean up files
-    req.files.forEach(f => {
-      if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
-    });
+    // Optional cleanup:
+    // fs.rmSync(uploadDir, { recursive: true, force: true });
 
     res.status(200).json({
       success: true,
       message: 'Screening complete',
       executionId,
-      data: result.data,
+      data: result,
     });
   } catch (error) {
     console.error('Resume screener error:', error);
@@ -199,8 +188,6 @@ router.post('/resume-screener', authenticateToken, upload.array('files', 100), a
 
 /**
  * GET /api/bots/history
- * Get bot execution history for current user
- * Headers: { Authorization: "Bearer <token>" }
  */
 router.get('/history', authenticateToken, async (req, res) => {
   try {
@@ -229,14 +216,11 @@ router.get('/history', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/bots/result/:executionId
- * Get results for a specific execution
- * Headers: { Authorization: "Bearer <token>" }
  */
 router.get('/result/:executionId', authenticateToken, async (req, res) => {
   try {
     const { executionId } = req.params;
 
-    // Verify execution belongs to user
     const execution = await db.getOne(
       `SELECT id, user_id, status FROM bot_executions WHERE id = $1`,
       [executionId]
@@ -257,7 +241,6 @@ router.get('/result/:executionId', authenticateToken, async (req, res) => {
       });
     }
 
-    // Get results
     const result = await db.getOne(
       `SELECT result_data, summary_text FROM results WHERE execution_id = $1`,
       [executionId]
