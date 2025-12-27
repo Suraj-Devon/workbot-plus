@@ -1,14 +1,23 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet'); // NEW
 const db = require('./src/models/database');
 const authRoutes = require('./src/routes/auth');
 const botsRoutes = require('./src/routes/bots');
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// Security & CORS
+app.use(helmet()); // secure headers
+app.use(
+  cors({
+    origin: process.env.CLIENT_ORIGIN || 'http://localhost:3000',
+    credentials: true,
+  })
+);
+
+// Body parsing
 app.use(express.json());
 
 // Initialize database when server starts
@@ -16,11 +25,11 @@ let dbInitialized = false;
 
 // Health Check Route
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'WorkBot+ Backend is running!',
     timestamp: new Date().toISOString(),
-    database: dbInitialized ? 'Connected' : 'Initializing'
+    database: dbInitialized ? 'Connected' : 'Initializing',
   });
 });
 
@@ -38,9 +47,9 @@ app.use('/api/bots', botsRoutes);
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err);
-  res.status(500).json({ 
+  res.status(500).json({
     error: 'Internal Server Error',
-    message: err.message 
+    message: err.message,
   });
 });
 

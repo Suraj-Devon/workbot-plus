@@ -1,10 +1,13 @@
 'use client'
 
-import { FormEvent, useState } from 'react'
+import { FormEvent, useState, ChangeEvent } from 'react'
 import { useAuth } from '../../../../context/AuthContext'
 import api from '../../../../lib/api'
 import toast from 'react-hot-toast'
 import DataAnalysisResult, { PythonAnalysis } from '../../../../components/DataAnalysisResult'
+
+const MAX_FILE_MB = 10
+const ALLOWED_TYPES = ['text/csv', 'application/json']
 
 export default function DataAnalystBotPage() {
   const { user } = useAuth()
@@ -12,6 +15,35 @@ export default function DataAnalystBotPage() {
   const [loading, setLoading] = useState(false)
   const [analysis, setAnalysis] = useState<PythonAnalysis | null>(null)
   const [raw, setRaw] = useState<any | null>(null)
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    if (!f) {
+      setFile(null)
+      return
+    }
+
+    const sizeMb = f.size / 1024 / 1024
+    if (sizeMb > MAX_FILE_MB) {
+      toast.error(`File too large. Max ${MAX_FILE_MB} MB`)
+      e.target.value = ''
+      setFile(null)
+      return
+    }
+
+    if (!ALLOWED_TYPES.includes(f.type)) {
+      // Fallback check by extension
+      const name = f.name.toLowerCase()
+      if (!name.endsWith('.csv') && !name.endsWith('.json')) {
+        toast.error('Only CSV or JSON files are allowed')
+        e.target.value = ''
+        setFile(null)
+        return
+      }
+    }
+
+    setFile(f)
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -54,7 +86,7 @@ export default function DataAnalystBotPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-teal-50/50 p-6">
       <div className="max-w-6xl mx-auto space-y-8">
-        {/* Hero Section - Phase 6 Design System */}
+        {/* Hero Section */}
         <div className="text-center">
           <div className="inline-flex items-center gap-3 bg-teal-100/80 backdrop-blur-sm text-teal-800 px-6 py-3 rounded-2xl mb-6 border border-teal-200/50">
             <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
@@ -67,7 +99,7 @@ export default function DataAnalystBotPage() {
           </p>
         </div>
 
-        {/* Upload Section - Matches dashboard cards */}
+        {/* Upload Section */}
         <div className="grid lg:grid-cols-2 gap-8 items-start">
           {/* Upload Form */}
           <div className="card bg-white/80 backdrop-blur-sm shadow-xl border border-slate-100/50 rounded-3xl p-8">
@@ -79,17 +111,17 @@ export default function DataAnalystBotPage() {
                 <label className="block text-sm font-semibold text-slate-700">
                   Data file (CSV or JSON)
                 </label>
-                <div 
+                <div
                   className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all ${
-                    file 
-                      ? 'border-teal-300 bg-teal-50' 
+                    file
+                      ? 'border-teal-300 bg-teal-50'
                       : 'border-slate-300 hover:border-teal-400 hover:bg-teal-50/50'
                   }`}
                 >
                   <input
                     type="file"
                     accept=".csv,.json"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                    onChange={handleFileChange}
                     className="hidden"
                     id="file-upload"
                   />
@@ -100,18 +132,22 @@ export default function DataAnalystBotPage() {
                     {file ? (
                       <div>
                         <p className="font-semibold text-slate-900">{file.name}</p>
-                        <p className="text-sm text-teal-700">{(file.size / 1024 / 1024).toFixed(1)} MB</p>
+                        <p className="text-sm text-teal-700">
+                          {(file.size / 1024 / 1024).toFixed(1)} MB • Max {MAX_FILE_MB} MB
+                        </p>
                       </div>
                     ) : (
                       <div>
-                        <p className="text-lg font-semibold text-slate-900 mb-1">Drop CSV/JSON or click to browse</p>
-                        <p className="text-sm text-slate-500">Max 10MB - Secure processing</p>
+                        <p className="text-lg font-semibold text-slate-900 mb-1">
+                          Drop CSV/JSON or click to browse
+                        </p>
+                        <p className="text-sm text-slate-500">Max {MAX_FILE_MB}MB - Secure processing</p>
                       </div>
                     )}
                   </label>
                 </div>
               </div>
-              
+
               <button
                 type="submit"
                 disabled={loading || !file}
@@ -142,7 +178,7 @@ export default function DataAnalystBotPage() {
                 <li>• Executive summary</li>
               </ul>
             </div>
-            
+
             {!analysis && (
               <div className="h-80 bg-gradient-to-br from-slate-50 to-slate-100 rounded-3xl border-2 border-dashed border-slate-200 flex items-center justify-center">
                 <div className="text-center text-slate-500">
