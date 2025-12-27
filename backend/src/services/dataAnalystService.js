@@ -13,50 +13,115 @@ const db = require('../models/database');
 const analyzeData = async (filePath, userId) => {
   return new Promise((resolve) => {
     try {
-      // Generate execution ID
-      const executionId = uuidv4();
-
       // Path to Python script
-      const pythonScript = path.join(__dirname, '../../ai_workers/data_analyst_bot.py');
+      const pythonScript = path.join(
+        __dirname,
+        '../../ai_workers/data_analyst_bot.py'
+      );
 
-      // Run Python script
-      const command = `python "${pythonScript}" "${filePath}" "${executionId}"`;
+      // Create an execution record first (required by FK on results.execution_id)
+      // Status will be updated/used for history in future
+      db.query(
+        `INSERT INTO bot_executions (id, user_id, bot_type, status, created_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         RETURNING id`,
+        [uuidv4(), userId || null, 'data-analyst', 'running']
+      )
+        .then(({ rows }) => {
+          const executionId = rows[0].id;
 
-      exec(command, { timeout: 60000 }, async (error, stdout, stderr) => {
-        try {
-          if (error) {
-            console.error('Python error:', stderr);
-            return resolve({
-              success: false,
-              error: 'Analysis failed',
-              message: stderr || error.message,
-            });
-          }
+          // Run Python script: python data_analyst_bot.py <filePath> <executionId>
+          const command = `python "${pythonScript}" "${filePath}" "${executionId}"`;
 
-          // Parse Python output
-          const result = JSON.parse(stdout);
+          exec(command, { timeout: 60000 }, async (error, stdout, stderr) => {
+            try {
+              if (error) {
+                console.error('Python error:', stderr || error.message);
 
-          // Save to database
-          await db.query(
-            `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
-             VALUES ($1, $2, $3, $4, NOW())`,
-            [uuidv4(), executionId, result, result.summary || 'Analysis complete']
-          );
+                // Optionally mark execution as failed
+                await db.query(
+                  `UPDATE bot_executions
+                     SET status = $2, updated_at = NOW()
+                   WHERE id = $1`,
+                  [executionId, 'failed']
+                );
 
-          resolve({
-            success: true,
-            executionId,
-            data: result,
+                return resolve({
+                  success: false,
+                  error: 'Analysis failed',
+                  message: stderr || error.message,
+                });
+              }
+
+              if (!stdout) {
+                await db.query(
+                  `UPDATE bot_executions
+                     SET status = $2, updated_at = NOW()
+                   WHERE id = $1`,
+                  [executionId, 'failed']
+                );
+
+                return resolve({
+                  success: false,
+                  error: 'No output',
+                  message: 'Python script returned empty output',
+                });
+              }
+
+              // Parse Python output
+              const result = JSON.parse(stdout);
+
+              // Save to results table
+              await db.query(
+                `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
+                 VALUES ($1, $2, $3, $4, NOW())`,
+                [
+                  uuidv4(),
+                  executionId,
+                  result,
+                  result.summary || 'Analysis complete',
+                ]
+              );
+
+              // Mark execution as completed
+              await db.query(
+                `UPDATE bot_executions
+                   SET status = $2, updated_at = NOW()
+                 WHERE id = $1`,
+                [executionId, 'completed']
+              );
+
+              resolve({
+                success: true,
+                executionId,
+                data: result,
+              });
+            } catch (err) {
+              console.error('Parse error:', err);
+
+              await db.query(
+                `UPDATE bot_executions
+                   SET status = $2, updated_at = NOW()
+                 WHERE id = $1`,
+                [executionId, 'failed']
+              );
+
+              resolve({
+                success: false,
+                error: 'Failed to process results',
+                message: err.message,
+              });
+            }
           });
-        } catch (err) {
-          console.error('Parse error:', err);
+        })
+        .catch((error) => {
+          console.error('Analysis error (create execution):', error);
           resolve({
             success: false,
-            error: 'Failed to process results',
-            message: err.message,
+            error: 'Internal error',
+            message: error.message,
           });
-        }
-      });
+        });
     } catch (error) {
       console.error('Analysis error:', error);
       resolve({

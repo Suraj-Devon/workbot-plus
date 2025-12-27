@@ -13,81 +13,148 @@ const db = require('../models/database');
 const screenResumes = async (filesPath, jobDescription, userId) => {
   return new Promise((resolve) => {
     try {
-      // Generate execution ID
-      const executionId = uuidv4();
+      const pythonScript = path.join(
+        __dirname,
+        '../../ai_workers/resume_screener_bot.py'
+      );
 
-      // Path to Python script
-      const pythonScript = path.join(__dirname, '../../ai_workers/resume_screener_bot.py');
-
-      // Create temp files dir if needed
+      // Ensure temp dir exists (if you still use it elsewhere)
       const tempDir = path.join(__dirname, '../../temp');
       if (!require('fs').existsSync(tempDir)) {
         require('fs').mkdirSync(tempDir, { recursive: true });
       }
 
       // Escape quotes in job description for shell
-      const escapedJobDesc = jobDescription.replace(/"/g, '\\"').replace(/'/g, "\\'");
+      const escapedJobDesc = jobDescription
+        .replace(/"/g, '\\"')
+        .replace(/'/g, "\\'");
 
-      // FIXED: Match Python script args exactly: upload_dir, job_description, execution_id
-      const command = `python "${pythonScript}" "${filesPath}" "${escapedJobDesc}" "${executionId}"`;
+      // Create an execution row first
+      db.query(
+        `INSERT INTO bot_executions (id, user_id, bot_type, status, created_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         RETURNING id`,
+        [uuidv4(), userId || null, 'resume-screener', 'running']
+      )
+        .then(({ rows }) => {
+          const executionId = rows[0].id;
 
-      console.log('Executing:', command); // DEBUG
+          // Match Python script args exactly: upload_dir, job_description, execution_id
+          const command = `python "${pythonScript}" "${filesPath}" "${escapedJobDesc}" "${executionId}"`;
 
-      exec(command, { timeout: 120000, cwd: path.dirname(pythonScript) }, async (error, stdout, stderr) => {
-        try {
-          if (error) {
-            console.error('Python error:', error.message);
-            console.error('Stderr:', stderr);
-            return resolve({
-              success: false,
-              error: 'Screening failed',
-              message: stderr || error.message,
-            });
-          }
+          console.log('Executing:', command);
 
-          if (!stdout) {
-            return resolve({
-              success: false,
-              error: 'No output',
-              message: 'Python script returned empty output',
-            });
-          }
+          exec(
+            command,
+            { timeout: 120000, cwd: path.dirname(pythonScript) },
+            async (error, stdout, stderr) => {
+              try {
+                if (error) {
+                  console.error('Python error:', error.message);
+                  console.error('Stderr:', stderr);
 
-          // Parse Python output
-          let result;
-          try {
-            result = JSON.parse(stdout.trim());
-          } catch (parseErr) {
-            console.error('Parse error:', parseErr, 'Raw output:', stdout);
-            return resolve({
-              success: false,
-              error: 'Invalid output format',
-              message: 'Python script returned invalid JSON',
-            });
-          }
+                  await db.query(
+                    `UPDATE bot_executions
+                       SET status = $2, updated_at = NOW()
+                     WHERE id = $1`,
+                    [executionId, 'failed']
+                  );
 
-          // Save to database
-          await db.query(
-            `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
-             VALUES ($1, $2, $3, $4, NOW())`,
-            [uuidv4(), executionId, result, result.summary || 'Screening complete']
+                  return resolve({
+                    success: false,
+                    error: 'Screening failed',
+                    message: stderr || error.message,
+                  });
+                }
+
+                if (!stdout) {
+                  await db.query(
+                    `UPDATE bot_executions
+                       SET status = $2, updated_at = NOW()
+                     WHERE id = $1`,
+                    [executionId, 'failed']
+                  );
+
+                  return resolve({
+                    success: false,
+                    error: 'No output',
+                    message: 'Python script returned empty output',
+                  });
+                }
+
+                // Parse Python output
+                let result;
+                try {
+                  result = JSON.parse(stdout.trim());
+                } catch (parseErr) {
+                  console.error('Parse error:', parseErr, 'Raw output:', stdout);
+
+                  await db.query(
+                    `UPDATE bot_executions
+                       SET status = $2, updated_at = NOW()
+                     WHERE id = $1`,
+                    [executionId, 'failed']
+                  );
+
+                  return resolve({
+                    success: false,
+                    error: 'Invalid output format',
+                    message: 'Python script returned invalid JSON',
+                  });
+                }
+
+                // Save to results table
+                await db.query(
+                  `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
+                   VALUES ($1, $2, $3, $4, NOW())`,
+                  [
+                    uuidv4(),
+                    executionId,
+                    result,
+                    result.summary || 'Screening complete',
+                  ]
+                );
+
+                await db.query(
+                  `UPDATE bot_executions
+                     SET status = $2, updated_at = NOW()
+                   WHERE id = $1`,
+                  [executionId, 'completed']
+                );
+
+                console.log('Screening success:', result);
+                resolve({
+                  success: true,
+                  executionId,
+                  data: result,
+                });
+              } catch (err) {
+                console.error('Service error:', err);
+
+                await db.query(
+                  `UPDATE bot_executions
+                     SET status = $2, updated_at = NOW()
+                   WHERE id = $1`,
+                  [executionId, 'failed']
+                );
+
+                resolve({
+                  success: false,
+                  error: 'Failed to process results',
+                  message: err.message,
+                });
+              }
+            }
           );
-
-          console.log('Screening success:', result); // DEBUG
-          resolve({
-            success: true,
-            executionId,
-            data: result,
-          });
-        } catch (err) {
-          console.error('Service error:', err);
+        })
+        .catch((error) => {
+          console.error('Screening error (create execution):', error);
           resolve({
             success: false,
-            error: 'Failed to process results',
-            message: err.message,
+            error: 'Internal error',
+            message: error.message,
           });
-        }
-      });
+        });
     } catch (error) {
       console.error('Screening error:', error);
       resolve({
