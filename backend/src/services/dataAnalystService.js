@@ -20,7 +20,6 @@ const analyzeData = async (filePath, userId) => {
       );
 
       // Create an execution record first (required by FK on results.execution_id)
-      // Status will be updated/used for history in future
       db.query(
         `INSERT INTO bot_executions (id, user_id, bot_type, status, created_at)
          VALUES ($1, $2, $3, $4, NOW())
@@ -38,10 +37,10 @@ const analyzeData = async (filePath, userId) => {
               if (error) {
                 console.error('Python error:', stderr || error.message);
 
-                // Optionally mark execution as failed
+                // Mark execution as failed
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2, updated_at = NOW()
+                     SET status = $2
                    WHERE id = $1`,
                   [executionId, 'failed']
                 );
@@ -56,7 +55,7 @@ const analyzeData = async (filePath, userId) => {
               if (!stdout) {
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2, updated_at = NOW()
+                     SET status = $2
                    WHERE id = $1`,
                   [executionId, 'failed']
                 );
@@ -86,7 +85,7 @@ const analyzeData = async (filePath, userId) => {
               // Mark execution as completed
               await db.query(
                 `UPDATE bot_executions
-                   SET status = $2, updated_at = NOW()
+                   SET status = $2
                  WHERE id = $1`,
                 [executionId, 'completed']
               );
@@ -101,7 +100,7 @@ const analyzeData = async (filePath, userId) => {
 
               await db.query(
                 `UPDATE bot_executions
-                   SET status = $2, updated_at = NOW()
+                   SET status = $2
                  WHERE id = $1`,
                 [executionId, 'failed']
               );

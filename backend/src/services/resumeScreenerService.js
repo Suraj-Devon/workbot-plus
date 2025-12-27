@@ -18,7 +18,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
         '../../ai_workers/resume_screener_bot.py'
       );
 
-      // Ensure temp dir exists (if you still use it elsewhere)
+      // Ensure temp dir exists (if used elsewhere)
       const tempDir = path.join(__dirname, '../../temp');
       if (!require('fs').existsSync(tempDir)) {
         require('fs').mkdirSync(tempDir, { recursive: true });
@@ -55,7 +55,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2, updated_at = NOW()
+                       SET status = $2
                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
@@ -70,7 +70,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
                 if (!stdout) {
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2, updated_at = NOW()
+                       SET status = $2
                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
@@ -91,7 +91,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2, updated_at = NOW()
+                       SET status = $2
                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
@@ -117,7 +117,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2, updated_at = NOW()
+                     SET status = $2
                    WHERE id = $1`,
                   [executionId, 'completed']
                 );
@@ -133,7 +133,7 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2, updated_at = NOW()
+                     SET status = $2
                    WHERE id = $1`,
                   [executionId, 'failed']
                 );
