@@ -50,7 +50,6 @@ export default function ResumeScreenerPage() {
       return
     }
 
-    // validate each file
     for (const f of Array.from(list)) {
       const sizeMb = f.size / 1024 / 1024
       if (sizeMb > MAX_FILE_MB) {
@@ -114,7 +113,7 @@ export default function ResumeScreenerPage() {
 
       const screener: ScreenerResult = inner
       setResult(screener)
-      toast.success(`Screened ${screener.total_resumes} resumes! 🎉`)
+      toast.success(`Screened ${screener.total_resumes} resumes!`)
     } catch (err: any) {
       console.error(err)
       toast.error(err.response?.data?.message || 'Failed to screen resumes')
@@ -213,10 +212,92 @@ export default function ResumeScreenerPage() {
           </button>
         </div>
 
-        {/* Results (unchanged) */}
+        {/* Results */}
         {result && (
-          /* ... keep your existing results JSX exactly as before ... */
-          <></>
+          <div className="space-y-6">
+            {/* Summary + stats */}
+            <div className="grid md:grid-cols-3 gap-4">
+              <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm">
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-1">
+                  Total resumes
+                </p>
+                <p className="text-2xl font-bold text-slate-900">
+                  {result.total_resumes}
+                </p>
+              </div>
+              <div className="bg-white/90 border border-emerald-100 rounded-2xl p-5 shadow-sm">
+                <p className="text-xs uppercase tracking-wide text-emerald-600 mb-1">
+                  Strong candidates (70%+)
+                </p>
+                <p className="text-2xl font-bold text-emerald-700">
+                  {result.strong_candidates}
+                </p>
+              </div>
+              <div className="bg-white/90 border border-indigo-100 rounded-2xl p-5 shadow-sm">
+                <p className="text-xs uppercase tracking-wide text-indigo-600 mb-1">
+                  Summary
+                </p>
+                <p className="text-sm text-slate-800">{result.summary}</p>
+              </div>
+            </div>
+
+            {/* Insights */}
+            {result.insights?.length > 0 && (
+              <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm">
+                <h3 className="text-sm font-semibold text-slate-900 mb-2">Insights</h3>
+                <ul className="list-disc list-inside text-sm text-slate-700 space-y-1">
+                  {result.insights.map((i, idx) => (
+                    <li key={idx}>{i}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Ranking table */}
+            <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm overflow-x-auto">
+              <h3 className="text-sm font-semibold text-slate-900 mb-3">
+                Ranked candidates
+              </h3>
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    <th className="text-left py-2 pr-4">Rank</th>
+                    <th className="text-left py-2 pr-4">File</th>
+                    <th className="text-left py-2 pr-4">Score</th>
+                    <th className="text-left py-2 pr-4">Matched skills</th>
+                    <th className="text-left py-2 pr-4">Missing skills</th>
+                    <th className="text-left py-2 pr-4">Reasoning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.ranking.map((c) => (
+                    <tr key={c.rank} className="border-b border-slate-50">
+                      <td className="py-2 pr-4 font-medium text-slate-900">
+                        #{c.rank}
+                      </td>
+                      <td className="py-2 pr-4 text-slate-800">{c.file_name}</td>
+                      <td className="py-2 pr-4">
+                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700">
+                          {c.score}%
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 text-slate-700">
+                        {c.matched_skills.length
+                          ? c.matched_skills.join(', ')
+                          : '—'}
+                      </td>
+                      <td className="py-2 pr-4 text-slate-500">
+                        {c.missing_skills.length
+                          ? c.missing_skills.join(', ')
+                          : '—'}
+                      </td>
+                      <td className="py-2 pr-4 text-slate-700">{c.reasoning}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </div>
     </div>
