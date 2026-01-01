@@ -53,11 +53,22 @@ def estimate_experience_months(text: str) -> int:
     return months
 
 
+# Extended stopwords for JD tokens (removes generic words like "required", "experience"). [web:277]
+JD_STOPWORDS = {
+    "and", "the", "for", "with", "from", "that", "this", "have", "able", "will",
+    "required", "requirement", "requirements", "must", "should", "strong",
+    "good", "excellent", "skills", "skill", "experience", "experiences", "exp",
+    "year", "years", "yr", "yrs", "working", "work", "job", "role", "responsibilities",
+    "looking", "hiring", "candidate", "candidates", "ability", "proven", "etc",
+    "hands", "on", "hands-on"
+}
+
+
 def jd_resume_features(job_desc: str, resume_text: str) -> dict:
     jd = job_desc.lower()
     res = resume_text.lower()
 
-    # Tokens
+    # Tokens (simple alphabetic tokens)
     jd_tokens = set(re.findall(r"\b[a-z]{3,}\b", jd))
     res_tokens = set(re.findall(r"\b[a-z]{3,}\b", res))
 
@@ -65,8 +76,10 @@ def jd_resume_features(job_desc: str, resume_text: str) -> dict:
     overlap_ratio = len(common_tokens) / max(1, len(jd_tokens))
 
     # Important JD words (JD-driven skills)
-    stop = {"and", "the", "for", "with", "from", "that", "this", "have", "able", "will"}
-    jd_keywords = [t for t in jd_tokens if len(t) > 3 and t not in stop]
+    jd_keywords = [
+        t for t in jd_tokens
+        if len(t) > 2 and t not in JD_STOPWORDS
+    ]
     keyword_hits = sum(1 for t in jd_keywords if t in res_tokens)
 
     # Experience
@@ -146,8 +159,10 @@ def compute_match_score(job_desc: str, resume_text: str) -> dict:
     if edu_score == 1:
         reasons.append("Relevant degree or education mentioned.")
 
-    # JD skills for Matched / Missing columns (up to 10)
-    jd_skills = feats["jd_keywords"][:10]
+    # JD skills for Matched / Missing columns
+    # Use jd_keywords already filtered by JD_STOPWORDS, and
+    # only keep up to 10 distinct tokens.
+    jd_skills = list(dict.fromkeys(feats["jd_keywords"]))[:10]
     matched = [s for s in jd_skills if s in feats["res_tokens"]][:5]
     missing = [s for s in jd_skills if s not in feats["res_tokens"]][:5]
 
@@ -162,7 +177,7 @@ def compute_match_score(job_desc: str, resume_text: str) -> dict:
     }
 
 
-# ---------- Main API used by your app ----------
+# ---------- Adapter used by your app ----------
 
 def score_resume_ml(resume_text: str, job_desc: str) -> dict:
     """
@@ -175,7 +190,7 @@ def score_resume_ml(resume_text: str, job_desc: str) -> dict:
     # Map features into the fields your frontend expects
     semantic_similarity = float(result["overlap_ratio"] * 100.0)  # use overlap as "semantic"
     exp_months = result["exp_months"]
-    # simple exp_score 0–100 relative to 36 months, same as compute_match_score
+    # simple exp_score 0–100 relative to 36 months
     exp_score = int(min(exp_months / 36.0, 1.0) * 100)
 
     return {
@@ -188,6 +203,8 @@ def score_resume_ml(resume_text: str, job_desc: str) -> dict:
         "total_exp": float(exp_months / 12.0),  # years, for info only
     }
 
+
+# ---------- Main screening ----------
 
 def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> dict:
     try:
