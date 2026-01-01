@@ -1,6 +1,8 @@
 numpy
 scikit-learn
 rake-nltk
-python-docx
 nltk
 pandas
+python-docx
+PyMuPDF
+pdfplumber

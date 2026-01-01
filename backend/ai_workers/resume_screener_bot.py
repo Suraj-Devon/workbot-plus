@@ -25,18 +25,21 @@ except LookupError:
 # ---------------- File extraction ----------------
 def extract_text_from_file(file_path: str) -> str:
     p = (file_path or "").lower()
+
     try:
         if p.endswith(".txt"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read() or ""
 
         if p.endswith(".docx"):
+            # DOCX: paragraphs (simple + reliable)
             import docx
             d = docx.Document(file_path)
             return "\n".join([para.text for para in d.paragraphs if para.text]) or ""
 
         if p.endswith(".pdf"):
-            # Best-effort extraction with fallbacks
+            # PDFs vary a lot; some give empty text with basic extractors.
+            # Use best-effort fallback chain: PyMuPDF -> pdfplumber -> PyPDF2.
             # 1) PyMuPDF (fitz)
             try:
                 import fitz  # PyMuPDF
@@ -50,7 +53,7 @@ def extract_text_from_file(file_path: str) -> str:
             except Exception:
                 pass
 
-            # 2) pdfplumber (pdfminer.six based)
+            # 2) pdfplumber
             try:
                 import pdfplumber
                 out = []
@@ -93,12 +96,14 @@ def normalize_text(t: str) -> str:
     t = re.sub(r"\btalent\s*acquisition\b", "talent acquisition", t)
     t = re.sub(r"\bstakeholder\s*management\b", "stakeholder management", t)
 
+    # normalize unicode dashes
     t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
 
 def phrase_in_text(phrase: str, text_norm: str) -> bool:
+    # strict boundary match: prevents 'sql' matching 'mysql'
     pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
     return re.search(pattern, text_norm) is not None
 
@@ -210,6 +215,7 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
         if len(merged) >= top_k:
             break
 
+    # Remove unigram parts when multi-word phrase exists
     multi = [s for s in merged if " " in s]
     multi_parts = set()
     for m in multi:
@@ -236,9 +242,6 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
         else:
             missing.append(s)
 
-    matched_top = matched[:8]
-    missing_top = missing[:8]
-
     denom = max(1, min(len(jd_skills), 10))
     coverage = len(matched[:denom]) / denom
 
@@ -246,24 +249,36 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
     M = vectorizer.transform([jd_norm, resume_text_norm])
     sem = float(cosine_similarity(M[0], M[1])[0][0]) if M.shape[1] else 0.0
 
-    exp_m = estimate_experience_months(resume_text_norm)
-    exp_score = min(exp_m / 36.0, 1.0)
+    # --- Experience: count months as usual, but only "credit" it if resume looks relevant ---
+    exp_m_raw = estimate_experience_months(resume_text_norm)
+    exp_score_raw = min(exp_m_raw / 36.0, 1.0)
+
+    # Relevance gate: if a resume doesn't match skills/meaning, experience should not boost score.
+    # (This addresses "manager exp for developer JD".)
+    relevance = max(coverage, sem)  # 0..1
+    # Soft floor so that slightly-relevant resumes still get some credit.
+    relevance = min(1.0, max(0.0, relevance))
+    exp_score = exp_score_raw * relevance
+
     proj_score = min(project_mentions(resume_text_norm) / 5.0, 1.0)
     edu = education_score(resume_text_norm)
 
     final = (
-        0.40 * coverage +
-        0.25 * sem +
-        0.25 * exp_score +
-        0.07 * proj_score +
-        0.03 * edu
+        0.45 * coverage +
+        0.30 * sem +
+        0.18 * exp_score +      # reduced weight + relevance-gated
+        0.05 * proj_score +
+        0.02 * edu
     )
     score = round(final * 100, 1)
+
+    matched_top = matched[:8]
+    missing_top = missing[:8]
 
     reasons = [
         f"Skills: {round(coverage*100,1)}% ({len(matched[:denom])}/{denom} JD skills).",
         f"Semantic: {round(sem*100,1)}%.",
-        f"Experience: ~{exp_m} months.",
+        f"Experience: ~{exp_m_raw} months (relevance-adjusted: {int(round(exp_score*100))}%).",
         f"Projects: {project_mentions(resume_text_norm)}.",
         f"Degree: {'Yes' if edu else 'No'}."
     ]
@@ -280,22 +295,21 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
 
 def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> dict:
     try:
-        # FIXED: "*.pdf" (your old "*.[tp]df" doesn't match PDFs)
-        resume_files = (
-            list(Path(upload_dir).glob("*.pdf"))
-            + list(Path(upload_dir).glob("*.txt"))
-            + list(Path(upload_dir).glob("*.docx"))
-        )
+        upload_path = Path(upload_dir)
+
+        # supports: txt + pdf + docx
+        allowed = {".pdf", ".txt", ".docx"}
+        resume_files = [p for p in upload_path.iterdir() if p.is_file() and p.suffix.lower() in allowed]
 
         if not resume_files:
             return {"success": False, "error": "No resumes found"}
 
         resumes = []
-        skipped = 0
+        skipped = []
         for resume_file in resume_files[:100]:
             text = extract_text_from_file(str(resume_file))
             if len((text or "").strip()) < 50:
-                skipped += 1
+                skipped.append(resume_file.name)
                 continue
             resumes.append((resume_file.name, normalize_text(text)))
 
@@ -307,17 +321,20 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
                 "strong_candidates": 0,
                 "strong_threshold": 70,
                 "ranking": [],
-                "insights": [f"No valid resumes found (skipped {skipped} files: unreadable/empty text)."],
+                "insights": [
+                    "No valid resumes found (all were empty/unreadable after extraction).",
+                    f"Skipped: {', '.join(skipped[:10])}" + (" ..." if len(skipped) > 10 else "")
+                ],
                 "summary": "No valid resumes found",
             }
 
         vectorizer = TfidfVectorizer(
             lowercase=True,
             stop_words=list(STOP_ALL),
-            ngram_range=(1, 3),
+            ngram_range=(1, 4),
             min_df=1,
-            max_df=0.90,
-            max_features=40000,
+            max_df=0.85,
+            max_features=30000,
             norm="l2",
         )
         vectorizer.fit([normalize_text(job_description)] + [t for _, t in resumes])
@@ -352,9 +369,10 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
         insights = [
             f"AI screened {len(results)} resumes using RAKE skill phrases + TF‑IDF similarity.",
             f"Avg semantic match: {avg_sem:.0f}%.",
+            f"JD skills extracted: {', '.join(jd_skills[:12])}" + (" ..." if len(jd_skills) > 12 else "")
         ]
         if skipped:
-            insights.append(f"Skipped {skipped} files (empty/unreadable text).")
+            insights.append(f"Skipped {len(skipped)} files (empty/unreadable text).")
 
         return {
             "success": True,
