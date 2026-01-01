@@ -9,13 +9,22 @@ const MAX_FILE_MB = 5
 const MAX_FILES = 100
 const ALLOWED_TYPES = ['application/pdf', 'text/plain']
 
-type RankedCandidate = {
+// Support BOTH old (score/matched_skills) + new ML (overall_score/semantic_similarity)
+type Candidate = {
   file_name: string
-  score: number
-  matched_skills: string[]
-  missing_skills: string[]
-  reasoning: string
   rank: number
+  // Old fields (legacy)
+  score?: number
+  matched_skills?: string[]
+  missing_skills?: string[]
+  // New ML fields
+  overall_score?: number
+  semantic_similarity?: number
+  exp_score?: number
+  matched_must?: string[]
+  missing_must?: string[]
+  // Both
+  reasoning: string
 }
 
 type ScreenerResult = {
@@ -23,10 +32,35 @@ type ScreenerResult = {
   execution_id: string
   total_resumes: number
   strong_candidates: number
-  ranking: RankedCandidate[]
+  ranking: Candidate[]
   insights: string[]
   summary: string
   error?: string
+}
+
+// Helper: Get score (handles both old + new)
+const getScore = (c: Candidate): number => {
+  return c.overall_score ?? c.score ?? 0
+}
+
+// Helper: Get matched (handles both old + new)
+const getMatched = (c: Candidate): string[] => {
+  return (c.matched_must ?? c.matched_skills ?? []).slice(0, 3)
+}
+
+// Helper: Get missing (handles both old + new)
+const getMissing = (c: Candidate): string[] => {
+  return (c.missing_must ?? c.missing_skills ?? []).slice(0, 3)
+}
+
+// Helper: Get semantic similarity (new ML field)
+const getSemantic = (c: Candidate): number => {
+  return c.semantic_similarity ?? 0
+}
+
+// Helper: Get exp score (new ML field)
+const getExpScore = (c: Candidate): number => {
+  return c.exp_score ?? 0
 }
 
 export default function ResumeScreenerPage() {
@@ -124,7 +158,7 @@ export default function ResumeScreenerPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50/50 p-6">
-      <div className="max-w-6xl mx-auto space-y-8">
+      <div className="max-w-7xl mx-auto space-y-8">
         {/* Hero */}
         <div className="text-center">
           <div className="inline-flex items-center gap-3 bg-indigo-100/80 backdrop-blur-sm text-indigo-800 px-6 py-3 rounded-2xl mb-6 border border-indigo-200/50">
@@ -134,7 +168,7 @@ export default function ResumeScreenerPage() {
             </h1>
           </div>
           <p className="text-xl text-slate-600 max-w-3xl mx-auto leading-relaxed">
-            Upload resumes + job description → instant ranking by skills fit. Top 3 candidates ready in minutes.
+            Upload resumes + job description → AI semantic matching + experience parsing → ranked candidates in seconds.
           </p>
         </div>
 
@@ -215,7 +249,7 @@ export default function ResumeScreenerPage() {
         {/* Results */}
         {result && (
           <div className="space-y-6">
-            {/* Summary + stats */}
+            {/* Summary stats */}
             <div className="grid md:grid-cols-3 gap-4">
               <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-slate-500 mb-1">
@@ -237,14 +271,14 @@ export default function ResumeScreenerPage() {
                 <p className="text-xs uppercase tracking-wide text-indigo-600 mb-1">
                   Summary
                 </p>
-                <p className="text-sm text-slate-800">{result.summary}</p>
+                <p className="text-sm text-slate-800 line-clamp-2">{result.summary}</p>
               </div>
             </div>
 
             {/* Insights */}
             {result.insights?.length > 0 && (
               <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm">
-                <h3 className="text-sm font-semibold text-slate-900 mb-2">Insights</h3>
+                <h3 className="text-sm font-semibold text-slate-900 mb-3">Insights</h3>
                 <ul className="list-disc list-inside text-sm text-slate-700 space-y-1">
                   {result.insights.map((i, idx) => (
                     <li key={idx}>{i}</li>
@@ -253,49 +287,83 @@ export default function ResumeScreenerPage() {
               </div>
             )}
 
-            {/* Ranking table */}
+            {/* Ranking table - FIXED FOR ML */}
             <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm overflow-x-auto">
-              <h3 className="text-sm font-semibold text-slate-900 mb-3">
+              <h3 className="text-sm font-semibold text-slate-900 mb-4">
                 Ranked candidates
               </h3>
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-100">
-                    <th className="text-left py-2 pr-4">Rank</th>
-                    <th className="text-left py-2 pr-4">File</th>
-                    <th className="text-left py-2 pr-4">Score</th>
-                    <th className="text-left py-2 pr-4">Matched skills</th>
-                    <th className="text-left py-2 pr-4">Missing skills</th>
-                    <th className="text-left py-2 pr-4">Reasoning</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.ranking.map((c) => (
-                    <tr key={c.rank} className="border-b border-slate-50">
-                      <td className="py-2 pr-4 font-medium text-slate-900">
-                        #{c.rank}
-                      </td>
-                      <td className="py-2 pr-4 text-slate-800">{c.file_name}</td>
-                      <td className="py-2 pr-4">
-                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700">
-                          {c.score}%
-                        </span>
-                      </td>
-                      <td className="py-2 pr-4 text-slate-700">
-                        {c.matched_skills.length
-                          ? c.matched_skills.join(', ')
-                          : '—'}
-                      </td>
-                      <td className="py-2 pr-4 text-slate-500">
-                        {c.missing_skills.length
-                          ? c.missing_skills.join(', ')
-                          : '—'}
-                      </td>
-                      <td className="py-2 pr-4 text-slate-700">{c.reasoning}</td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50/50">
+                      <th className="text-left py-3 px-3 font-semibold text-slate-700">Rank</th>
+                      <th className="text-left py-3 px-3 font-semibold text-slate-700">File</th>
+                      <th className="text-center py-3 px-3 font-semibold text-slate-700">Overall</th>
+                      <th className="text-center py-3 px-3 font-semibold text-slate-700">Semantic</th>
+                      <th className="text-center py-3 px-3 font-semibold text-slate-700">Exp</th>
+                      <th className="text-left py-3 px-3 font-semibold text-slate-700">Matched</th>
+                      <th className="text-left py-3 px-3 font-semibold text-slate-700">Reasoning</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {result.ranking && result.ranking.length > 0 ? (
+                      result.ranking.map((c) => (
+                        <tr
+                          key={`${c.rank}-${c.file_name}`}
+                          className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors"
+                        >
+                          <td className="py-3 px-3 font-bold text-slate-900">
+                            #{c.rank}
+                          </td>
+                          <td className="py-3 px-3 text-slate-800 truncate max-w-xs">
+                            {c.file_name}
+                          </td>
+                          <td className="py-3 px-3 text-center">
+                            <span className="inline-flex items-center justify-center px-2 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700 min-w-12">
+                              {getScore(c)}%
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-center">
+                            <span className="text-slate-600 text-xs font-medium">
+                              {getSemantic(c).toFixed(1)}%
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-center">
+                            <span className="text-slate-600 text-xs font-medium">
+                              {getExpScore(c)}%
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-slate-700 text-xs">
+                            {getMatched(c).length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {getMatched(c).map((skill, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-xs font-medium"
+                                  >
+                                    {skill}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-slate-700 text-xs max-w-sm truncate">
+                            {c.reasoning || 'Analyzed'}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={7} className="py-4 text-center text-slate-500">
+                          No results
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
