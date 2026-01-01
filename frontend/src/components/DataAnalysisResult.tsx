@@ -418,7 +418,7 @@ export default function DataAnalysisResult({
         </div>
       )}
 
-     {/* ===== FORECAST  ===== */}
+{/* ===== FORECAST (FINAL PERFECT) ===== */}
 {analysis.forecast && Object.keys(analysis.forecast).length > 0 && (
   <div className="card p-6 border-l-4 border-purple-500">
     <h2 className="mb-6 text-sm font-semibold text-slate-900">📈 Forecast (Next 3 Periods)</h2>
@@ -432,45 +432,52 @@ export default function DataAnalysisResult({
           const range = maxVal - minVal || 1
 
           return (
-            <div key={col} className="bg-gradient-to-br from-purple-50 to-violet-50 p-6 rounded-xl border border-purple-200 shadow-sm hover:shadow-md transition-all">
-              {/* COLUMN NAME - NOW VISIBLE */}
-              <div className="mb-4 text-center">
-                <h3 className="font-bold text-slate-800 text-base truncate max-w-full mb-1">
-                  {col.length > 15 ? col.substring(0, 15) + '...' : col}
+            <div key={col} className="bg-gradient-to-br from-purple-50 to-violet-50 p-5 rounded-xl border border-purple-200 shadow-sm hover:shadow-md transition-all min-h-[280px]">
+              {/* COLUMN NAME - TOOLTIP FIX */}
+              <div className="mb-4 text-center pb-2 border-b border-purple-100">
+                <h3 
+                  className="font-bold text-slate-800 text-sm bg-gradient-to-r from-purple-600 to-violet-600 bg-clip-text text-transparent mb-2"
+                  title={col} // FULL NAME ON HOVER
+                  style={{ wordBreak: 'break-word', maxHeight: '3em', overflow: 'hidden' }}
+                >
+                  {col.length > 18 ? col.substring(0, 18) + '...' : col}
                 </h3>
                 <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
                   {trend} {fcData.slope > 0 ? `+${(fcData.slope*100).toFixed(1)}%` : `${(fcData.slope*100).toFixed(1)}%`}
                 </span>
               </div>
               
-              {/* CHART */}
-              <div className="flex items-end gap-1 h-28 mx-auto w-[90%]">
+              {/* CHART - WIDER + BETTER SPACING */}
+              <div className="flex items-end gap-2 h-28 mx-1 w-full px-2">
                 {fcData.next_3_periods.map((val: number, idx: number) => {
-                  const normalizedHeight = ((val - minVal) / range) * 100 + 10
+                  const normalizedHeight = ((val - minVal) / range) * 85 + 8
                   const isHighest = val === maxVal
                   return (
-                    <div key={idx} className="flex-1 flex flex-col items-center group relative">
+                    <div key={idx} className="flex-1 flex flex-col items-center min-w-0">
                       <div
-                        className={`w-full rounded-t-lg transition-all duration-500 hover:scale-110 ${
+                        className={`w-[85%] rounded-t-xl shadow-md transition-all duration-500 hover:scale-[1.05] ${
                           isHighest 
-                            ? 'bg-gradient-to-t from-purple-600 to-purple-400 shadow-lg' 
+                            ? 'bg-gradient-to-t from-purple-600 via-purple-500 to-purple-400 border-t-4 border-white' 
                             : 'bg-gradient-to-t from-purple-400 to-purple-200'
                         }`}
                         style={{ height: `${normalizedHeight}%` }}
-                        title={`Period ${idx+1}: ${val.toFixed(0)}`}
+                        title={`Period ${idx+1}: ${val.toLocaleString()}`}
                       />
-                      <p className="text-xs text-slate-600 mt-2 font-mono text-center min-w-[40px]">
+                      <p className="text-xs font-mono text-slate-700 mt-2 text-center leading-tight min-w-[48px]">
                         {val.toLocaleString()}
                       </p>
-                      <p className="text-xs text-slate-400 text-center">P{idx+1}</p>
+                      <p className="text-[10px] text-slate-500 font-medium">P{idx+1}</p>
                     </div>
                   )
                 })}
               </div>
               
-              {/* CURRENT TREND */}
+              {/* TREND INFO */}
               <div className="mt-4 pt-3 border-t border-purple-200 text-center">
-                <p className="text-xs text-slate-600">Slope: <span className="font-bold text-purple-700">{(fcData.slope*100).toFixed(1)}%</span></p>
+                <p className="text-xs text-slate-600">
+                  Slope: <span className="font-bold text-purple-700 font-mono">{(fcData.slope*100).toFixed(1)}%</span>
+                </p>
+                <p className="text-[10px] text-slate-500 mt-1">Max: {maxVal.toLocaleString()}</p>
               </div>
             </div>
           )
