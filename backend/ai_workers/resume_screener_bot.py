@@ -36,83 +36,123 @@ def extract_text_from_file(file_path: str) -> str:
         return ""
 
 
-def _tokenize_simple(text: str):
-    return re.findall(r"[a-zA-Z][a-zA-Z0-9\+\-#\.]{1,}", text.lower())
+# ---------- Normalisation helpers ----------
 
+STOP_BASIC = {
+    "and",
+    "the",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "will",
+    "you",
+    "your",
+    "our",
+    "are",
+    "have",
+    "has",
+    "job",
+    "role",
+    "year",
+    "years",
+    "experience",
+    "exp",
+}
+
+
+def normalize_token(t: str) -> str:
+    """
+    Turn 'Node.js' -> 'nodejs', 'REST APIs' -> 'restapi', remove plural 's' etc.
+    Very lightweight so it works across many JDs/resumes. [web:277]
+    """
+    t = t.lower().strip()
+    t = re.sub(r"[^a-z0-9#+]+", "", t)  # keep letters, digits, +, #
+    if len(t) > 4 and t.endswith("s"):
+        t = t[:-1]  # restapis -> restapi, skills -> skill
+    return t
+
+
+def tokenize_and_normalize(text: str) -> list[str]:
+    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9\+\-#\.]{1,}", text)
+    return [normalize_token(t) for t in raw if normalize_token(t) and normalize_token(t) not in STOP_BASIC]
+
+
+# ---------- JD parsing ----------
 
 def parse_job_requirements(job_desc: str) -> dict:
-    """
-    1) Try to read explicit 'Required' / 'Nice to have' sections.
-    2) If nothing is found, fall back to extracting frequent keyword-like tokens
-       from the whole JD as generic must_haves.
-    This keeps HR free to paste any JD (manual or AI-generated). [web:272][web:277]
-    """
     jd_lower = job_desc.lower()
 
-    must_haves: list[str] = []
-    nice_haves: list[str] = []
+    must_raw: list[str] = []
+    nice_raw: list[str] = []
 
-    # --- 1. Line-based parsing for common JD formats ---
+    # 1) Line-based parsing (handles "Required:", "Nice to have:", etc.). [web:272]
     lines = [ln.strip() for ln in jd_lower.splitlines() if ln.strip()]
     current_block = None  # "required" | "nice"
     for ln in lines:
+        header_hit = False
         if ln.startswith("required") or "must have" in ln or "must-have" in ln:
             current_block = "required"
-            # drop header text like "required:" itself
             ln = re.sub(r"required[:\-]?", "", ln)
+            header_hit = True
         elif "nice to have" in ln or "preferred" in ln or "bonus" in ln:
             current_block = "nice"
             ln = re.sub(r"(nice to have|preferred|bonus)[:\-]?", "", ln)
-        # bullet lines
+            header_hit = True
+
         if ln.startswith(("- ", "* ", "• ")):
             ln = ln[2:].strip()
+
         if current_block:
-            # split by commas or "and"
+            if header_hit and not ln:
+                continue
             parts = re.split(r"[,/]| and ", ln)
             for p in parts:
                 tok = p.strip(" -.")
                 if len(tok) > 2:
                     if current_block == "required":
-                        must_haves.append(tok)
+                        must_raw.append(tok)
                     else:
-                        nice_haves.append(tok)
+                        nice_raw.append(tok)
 
-    # --- 2. Regex-based backup if line scan failed ---
-    if not must_haves:
+    # 2) Regex-based backup for "Requirements:" paragraphs.
+    if not must_raw:
         must_patterns = [
-            r"(?:required|must have|must-have|essential).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
-            r"requirements?:\s*([a-zA-Z0-9\s/,+-]+)(?:\.|;|\n|$)",
+            r"(?:required|must have|must-have|essential)\s*[:\-]?\s*([a-zA-Z0-9\s/,+\-]+?)(?:\.|;|\n|$)",
+            r"requirements?\s*[:\-]?\s*([a-zA-Z0-9\s/,+\-]+?)(?:\.|;|\n|$)",
         ]
         for pattern in must_patterns:
             matches = re.findall(pattern, jd_lower, re.IGNORECASE)
             for match in matches:
                 tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
-                must_haves.extend(tokens)
+                must_raw.extend(tokens)
 
-    nice_patterns = [
-        r"(?:nice to have|preferred|bonus).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
-    ]
-    for pattern in nice_patterns:
-        matches = re.findall(pattern, jd_lower, re.IGNORECASE)
-        for match in matches:
-            tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
-            nice_haves.extend(tokens)
+    # 3) Fallback: use frequent tokens from whole JD if still nothing.
+    if not must_raw:
+        must_raw = tokenize_and_normalize(jd_lower)
 
-    # --- 3. Fallback: generic keyword extraction from entire JD ---
-    if not must_haves:
-        tokens = _tokenize_simple(jd_lower)
-        stop = {"and", "the", "for", "with", "from", "that", "this", "will", "you"}
-        # keep tokens that look like skills/technologies
-        skills_like = [
-            t for t in tokens
-            if len(t) > 2
-            and t not in stop
-            and not t.isdigit()
-        ]
-        # de‑duplicate and take top N
-        must_haves = list(dict.fromkeys(skills_like))[:10]
+    # Normalize and dedupe.
+    must_norm = []
+    for phrase in must_raw:
+        toks = tokenize_and_normalize(phrase)
+        if not toks:
+            continue
+        # join multi-word skill back, e.g., "reactjs" or "restapi"
+        skill = "".join(toks)
+        if skill and skill not in must_norm and skill not in STOP_BASIC:
+            must_norm.append(skill)
 
-    # --- 4. Experience requirement ---
+    nice_norm = []
+    for phrase in nice_raw:
+        toks = tokenize_and_normalize(phrase)
+        if not toks:
+            continue
+        skill = "".join(toks)
+        if skill and skill not in nice_norm and skill not in STOP_BASIC:
+            nice_norm.append(skill)
+
+    # Experience requirement
     years_patterns = [
         r"(\d+)\s*(?:\+?\s*)?(?:years?|yrs?)\s+(?:of\s+)?experience",
         r"(?:experience|exp).*?(\d+)\s*(?:years?|yrs?)",
@@ -124,11 +164,13 @@ def parse_job_requirements(job_desc: str) -> dict:
             min_years = max(min_years, int(match.group(1)))
 
     return {
-        "must_haves": list(dict.fromkeys(must_haves))[:10],
-        "nice_haves": list(dict.fromkeys(nice_haves))[:8],
+        "must_haves": must_norm[:10],
+        "nice_haves": nice_norm[:8],
         "min_years": min_years,
     }
 
+
+# ---------- Resume experience ----------
 
 def extract_resume_experience(resume_text: str) -> dict:
     exp_dict: dict[str, float] = {}
@@ -156,11 +198,15 @@ def extract_resume_experience(resume_text: str) -> dict:
     return exp_dict
 
 
+# ---------- Text cleaning for TF‑IDF ----------
+
 def clean_text_basic(text: str) -> str:
     stop_words = set(stopwords.words("english"))
     tokens = word_tokenize(text.lower())
     return " ".join([t for t in tokens if t.isalpha() and t not in stop_words and len(t) > 2])
 
+
+# ---------- Scoring ----------
 
 def score_resume_ml(resume_text: str, job_desc: str) -> dict:
     resume_clean = clean_text_basic(resume_text)
@@ -183,11 +229,12 @@ def score_resume_ml(resume_text: str, job_desc: str) -> dict:
     else:
         exp_score = int(min(total_exp, 3.0) / 3.0 * 70)
 
-    resume_lower = resume_text.lower()
-    matched_must = [req for req in jd_reqs["must_haves"] if req and req.lower() in resume_lower]
-    missing_must = [req for req in jd_reqs["must_haves"] if req and req.lower() not in resume_lower]
+    # Normalized token sets for matching.
+    resume_tokens = set(tokenize_and_normalize(resume_text))
+    matched_must_norm = [s for s in jd_reqs["must_haves"] if s in resume_tokens]
+    missing_must_norm = [s for s in jd_reqs["must_haves"] if s not in resume_tokens]
 
-    must_score = min(len(matched_must) * 20, 60)
+    must_score = min(len(matched_must_norm) * 20, 60)
 
     overall_score = (
         semantic_sim * 100 * 0.55
@@ -196,30 +243,36 @@ def score_resume_ml(resume_text: str, job_desc: str) -> dict:
     )
     overall_score = int(max(0, min(100, overall_score)))
 
+    # For display, show normalized tokens as‑is (they already look like skills).
+    matched_display = matched_must_norm[:5]
+    missing_display = missing_must_norm[:5]
+
     reasoning_parts = []
     reasoning_parts.append(f"Semantic match: {semantic_sim:.1%}")
     if jd_reqs["min_years"] > 0:
         reasoning_parts.append(f"Experience: {total_exp:.1f} years (JD asks {jd_reqs['min_years']}+)")
     else:
         reasoning_parts.append(f"Experience: {total_exp:.1f} years (no strict min in JD)")
-    if matched_must:
-        reasoning_parts.append("Matched must‑have: " + ", ".join(matched_must[:3]))
-    if missing_must:
-        reasoning_parts.append("Missing: " + ", ".join(missing_must[:2]))
+    if matched_display:
+        reasoning_parts.append("Matched must‑have: " + ", ".join(matched_display[:3]))
+    if missing_display:
+        reasoning_parts.append("Missing: " + ", ".join(missing_display[:2]))
 
-    if missing_must and jd_reqs["min_years"] > 0 and total_exp < jd_reqs["min_years"] * 0.6:
+    if missing_display and jd_reqs["min_years"] > 0 and total_exp < jd_reqs["min_years"] * 0.6:
         overall_score = min(overall_score, 70)
 
     return {
         "overall_score": overall_score,
         "semantic_similarity": float(semantic_sim * 100),
         "exp_score": int(exp_score),
-        "matched_must": matched_must[:5],
-        "missing_must": missing_must[:5],
+        "matched_must": matched_display,
+        "missing_must": missing_display,
         "reasoning": "; ".join(reasoning_parts),
         "total_exp": float(total_exp),
     }
 
+
+# ---------- Main screening ----------
 
 def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> dict:
     try:
