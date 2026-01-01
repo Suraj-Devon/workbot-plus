@@ -3,6 +3,7 @@ import sys
 import json
 import re
 from pathlib import Path
+
 import numpy as np
 
 import nltk
@@ -15,7 +16,6 @@ from rake_nltk import Rake
 
 
 # ---------------- NLTK bootstrap (stopwords only) ----------------
-# We do NOT use punkt anymore (we provide custom sentence tokenizer to RAKE).
 try:
     nltk.data.find("corpora/stopwords")
 except LookupError:
@@ -24,22 +24,56 @@ except LookupError:
 
 # ---------------- File extraction ----------------
 def extract_text_from_file(file_path: str) -> str:
+    p = (file_path or "").lower()
     try:
-        p = file_path.lower()
         if p.endswith(".txt"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-
-        if p.endswith(".pdf"):
-            import PyPDF2
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                return " ".join([(page.extract_text() or "") for page in reader.pages])
+                return f.read() or ""
 
         if p.endswith(".docx"):
             import docx
             d = docx.Document(file_path)
-            return "\n".join([para.text for para in d.paragraphs])
+            return "\n".join([para.text for para in d.paragraphs if para.text]) or ""
+
+        if p.endswith(".pdf"):
+            # Best-effort extraction with fallbacks
+            # 1) PyMuPDF (fitz)
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(file_path)
+                out = []
+                for page in doc:
+                    out.append(page.get_text("text") or "")
+                text = "\n".join(out).strip()
+                if len(text) >= 20:
+                    return text
+            except Exception:
+                pass
+
+            # 2) pdfplumber (pdfminer.six based)
+            try:
+                import pdfplumber
+                out = []
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages:
+                        out.append(page.extract_text() or "")
+                text = "\n".join(out).strip()
+                if len(text) >= 20:
+                    return text
+            except Exception:
+                pass
+
+            # 3) PyPDF2
+            try:
+                import PyPDF2
+                with open(file_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    out = []
+                    for page in reader.pages:
+                        out.append(page.extract_text() or "")
+                return "\n".join(out).strip()
+            except Exception:
+                return ""
 
         return ""
     except Exception:
@@ -65,20 +99,17 @@ def normalize_text(t: str) -> str:
 
 
 def phrase_in_text(phrase: str, text_norm: str) -> bool:
-    # strict boundary match: prevents 'sql' matching 'mysql'
     pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
     return re.search(pattern, text_norm) is not None
 
 
 # ---------------- RAKE tokenizers (NO punkt dependency) ----------------
 def simple_sentence_tokenizer(text: str):
-    # Split on punctuation and newlines; enough for RAKE phrase building
     parts = re.split(r"[.!?\n\r]+", text)
     return [p.strip() for p in parts if p and p.strip()]
 
 
 def simple_word_tokenizer(sentence: str):
-    # RAKE will lowercase later; keep words and tech tokens
     return re.findall(r"[a-z0-9][a-z0-9+\-#]*", sentence.lower())
 
 
@@ -132,6 +163,7 @@ def build_stopwords():
     }
     return base.union(domain)
 
+
 STOP_ALL = build_stopwords()
 
 
@@ -139,7 +171,6 @@ STOP_ALL = build_stopwords()
 def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 25) -> list[str]:
     jd_norm = normalize_text(job_desc)
 
-    # RAKE with custom sentence tokenizer to avoid punkt. [web:343][web:352]
     rake = Rake(
         stopwords=list(STOP_ALL),
         min_length=1,
@@ -151,7 +182,6 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
     rake.extract_keywords_from_text(jd_norm)
     rake_phrases = [p.strip() for p in rake.get_ranked_phrases() if len(p.strip()) >= 3]
 
-    # TF-IDF terms
     v = vectorizer.transform([jd_norm])
     tfidf_terms = []
     if v.nnz > 0:
@@ -167,7 +197,6 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
             if len(tfidf_terms) >= top_k:
                 break
 
-    # Merge
     merged = []
     seen = set()
     for s in rake_phrases + tfidf_terms:
@@ -181,7 +210,6 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
         if len(merged) >= top_k:
             break
 
-    # Remove unigram parts when multi-word phrase exists
     multi = [s for s in merged if " " in s]
     multi_parts = set()
     for m in multi:
@@ -252,18 +280,22 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
 
 def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> dict:
     try:
+        # FIXED: "*.pdf" (your old "*.[tp]df" doesn't match PDFs)
         resume_files = (
-            list(Path(upload_dir).glob("*.[tp]df"))
+            list(Path(upload_dir).glob("*.pdf"))
             + list(Path(upload_dir).glob("*.txt"))
             + list(Path(upload_dir).glob("*.docx"))
         )
+
         if not resume_files:
             return {"success": False, "error": "No resumes found"}
 
         resumes = []
+        skipped = 0
         for resume_file in resume_files[:100]:
             text = extract_text_from_file(str(resume_file))
-            if len(text.strip()) < 50:
+            if len((text or "").strip()) < 50:
+                skipped += 1
                 continue
             resumes.append((resume_file.name, normalize_text(text)))
 
@@ -275,7 +307,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
                 "strong_candidates": 0,
                 "strong_threshold": 70,
                 "ranking": [],
-                "insights": ["No valid resumes found"],
+                "insights": [f"No valid resumes found (skipped {skipped} files: unreadable/empty text)."],
                 "summary": "No valid resumes found",
             }
 
@@ -317,6 +349,13 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
 
         avg_sem = float(np.mean([r["semantic_similarity"] for r in results])) if results else 0.0
 
+        insights = [
+            f"AI screened {len(results)} resumes using RAKE skill phrases + TF‑IDF similarity.",
+            f"Avg semantic match: {avg_sem:.0f}%.",
+        ]
+        if skipped:
+            insights.append(f"Skipped {skipped} files (empty/unreadable text).")
+
         return {
             "success": True,
             "execution_id": execution_id,
@@ -324,10 +363,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
             "strong_candidates": strong_count,
             "strong_threshold": strong_threshold,
             "ranking": results[:25],
-            "insights": [
-                f"AI screened {len(results)} resumes using RAKE skill phrases + TF‑IDF similarity",
-                f"Avg semantic match: {avg_sem:.0f}%"
-            ],
+            "insights": insights,
             "summary": f"Top: {results[0]['file_name']} ({results[0]['overall_score']}%) - {results[0]['reasoning']}"
         }
 

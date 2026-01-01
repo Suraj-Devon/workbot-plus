@@ -1,9 +1,9 @@
 #!/bin/bash
-cd backend
-pip install numpy scikit-learn rake-nltk python-docx nltk pandas
+pip install -r backend/requirements.txt
+pip install PyMuPDF pdfplumber
+
 python -c "
 import nltk
-nltk.download('punkt')
-nltk.download('stopwords')
-print('✅ Backend ready')
+nltk.download('stopwords', quiet=True)  # punkt NOT needed
+print('✅ All Python deps + PyMuPDF/pdfplumber + NLTK stopwords ready')
 "
