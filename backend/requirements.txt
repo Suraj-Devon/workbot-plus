@@ -8,3 +8,4 @@ nltk==3.8.1
 regex
 scipy
 joblib
+chardet

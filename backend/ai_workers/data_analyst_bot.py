@@ -6,16 +6,50 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
+import chardet  # NEW: auto-detect encoding
 import warnings
 
 warnings.filterwarnings('ignore')
 
+def detect_encoding(file_path):
+    """Detect file encoding (UTF-8, UTF-16, Latin-1, etc.)"""
+    with open(file_path, 'rb') as f:
+        raw_data = f.read(10000)  # Read first 10KB
+    
+    result = chardet.detect(raw_data)
+    encoding = result.get('encoding', 'utf-8')
+    
+    # Handle cases where chardet returns None
+    if encoding is None:
+        encoding = 'utf-8'
+    
+    return encoding
+
 def analyze_csv(file_path, execution_id):
     """
-    Advanced ML analysis: KMeans clustering + Isolation Forest anomalies + trend forecast
+    Advanced ML analysis with encoding auto-detection
     """
     try:
-        df = pd.read_csv(file_path)
+        # ===== AUTO-DETECT ENCODING =====
+        encoding = detect_encoding(file_path)
+        
+        # Try detected encoding, fallback to others
+        df = None
+        encodings_to_try = [encoding, 'utf-8', 'latin-1', 'cp1252', 'utf-16', 'iso-8859-1']
+        
+        for enc in encodings_to_try:
+            try:
+                df = pd.read_csv(file_path, encoding=enc)
+                break  # Success
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        
+        if df is None:
+            return {
+                "success": False,
+                "error": "Could not decode CSV with any encoding (UTF-8, Latin-1, UTF-16, etc.). Try re-saving in Excel as UTF-8.",
+                "summary": "File encoding error"
+            }
         
         num_rows = len(df)
         num_cols = len(df.columns)
@@ -51,7 +85,7 @@ def analyze_csv(file_path, execution_id):
                     if abs(corr) > 0.5:
                         correlations[f"{col1} vs {col2}"] = corr
         
-        # ===== TRENDS (first half vs second half) =====
+        # ===== TRENDS =====
         trends = {}
         for col in numeric_cols:
             values = df[col].dropna()
@@ -63,7 +97,7 @@ def analyze_csv(file_path, execution_id):
                     if abs(trend_pct) > 5:
                         trends[col] = f"{trend_pct:+.1f}%"
         
-        # ===== OUTLIERS (IQR method) =====
+        # ===== OUTLIERS =====
         outliers = {}
         for col in numeric_cols:
             Q1 = df[col].quantile(0.25)
@@ -73,9 +107,9 @@ def analyze_csv(file_path, execution_id):
             if outlier_count > 0:
                 outliers[col] = outlier_count
         
-        # ===== KMEANS CLUSTERING (ML MAGIC) =====
+        # ===== KMEANS CLUSTERING =====
         clusters = {}
-        optimal_k = min(3, len(df) // 10, 5)  # 3-5 clusters, scale to data size
+        optimal_k = min(3, len(df) // 10, 5)
         
         if len(numeric_cols) > 0 and len(df) >= optimal_k:
             try:
@@ -99,7 +133,7 @@ def analyze_csv(file_path, execution_id):
             except Exception as e:
                 clusters["error"] = str(e)
         
-        # ===== ISOLATION FOREST ANOMALIES (ML MAGIC) =====
+        # ===== ISOLATION FOREST ANOMALIES =====
         anomalies = {}
         if len(numeric_cols) > 0 and len(df) > 10:
             try:
@@ -118,7 +152,7 @@ def analyze_csv(file_path, execution_id):
             except Exception as e:
                 anomalies["error"] = str(e)
         
-        # ===== FORECASTING (simple linear trend) =====
+        # ===== FORECASTING =====
         forecast = {}
         for col in numeric_cols:
             values = df[col].dropna().values
@@ -130,7 +164,7 @@ def analyze_csv(file_path, execution_id):
                 
                 forecast[col] = {
                     "next_3_periods": [float(y) for y in future_y],
-                    "slope": float(z[0])  # positive = uptrend, negative = downtrend
+                    "slope": float(z[0])
                 }
         
         # ===== INSIGHTS =====
@@ -152,6 +186,7 @@ def analyze_csv(file_path, execution_id):
         response = {
             "success": True,
             "execution_id": execution_id,
+            "file_encoding": encoding,  # NEW: show detected encoding
             "file_info": {
                 "rows": num_rows,
                 "columns": num_cols,
@@ -161,9 +196,9 @@ def analyze_csv(file_path, execution_id):
             "correlations": correlations,
             "trends": trends,
             "outliers": outliers,
-            "clusters": clusters,  # NEW
-            "anomalies": anomalies,  # NEW
-            "forecast": forecast,  # NEW
+            "clusters": clusters,
+            "anomalies": anomalies,
+            "forecast": forecast,
             "insights": insights,
             "summary": " | ".join(insights[:3])
         }
