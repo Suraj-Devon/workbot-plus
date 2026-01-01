@@ -4,8 +4,6 @@ import json
 import re
 import nltk
 from pathlib import Path
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
@@ -20,6 +18,8 @@ try:
 except LookupError:
     nltk.download("stopwords", quiet=True)
 
+
+# ---------- File loading ----------
 
 def extract_text_from_file(file_path: str) -> str:
     try:
@@ -36,243 +36,158 @@ def extract_text_from_file(file_path: str) -> str:
         return ""
 
 
-# ---------- Normalisation helpers ----------
+# ---------- Core feature logic (from notebook) ----------
 
-STOP_BASIC = {
-    "and",
-    "the",
-    "for",
-    "with",
-    "from",
-    "that",
-    "this",
-    "will",
-    "you",
-    "your",
-    "our",
-    "are",
-    "have",
-    "has",
-    "job",
-    "role",
-    "year",
-    "years",
-    "experience",
-    "exp",
-}
+def estimate_experience_months(text: str) -> int:
+    text = text.lower()
+    months = 0
+
+    year_match = re.search(r"(\d+)\s*(?:years?|yrs?)", text)
+    if year_match:
+        months += int(year_match.group(1)) * 12
+
+    month_match = re.search(r"(\d+)\s*(?:months?|mos?)", text)
+    if month_match:
+        months += int(month_match.group(1))
+
+    return months
 
 
-def normalize_token(t: str) -> str:
-    """
-    Turn 'Node.js' -> 'nodejs', 'REST APIs' -> 'restapi', remove plural 's' etc.
-    Very lightweight so it works across many JDs/resumes. [web:277]
-    """
-    t = t.lower().strip()
-    t = re.sub(r"[^a-z0-9#+]+", "", t)  # keep letters, digits, +, #
-    if len(t) > 4 and t.endswith("s"):
-        t = t[:-1]  # restapis -> restapi, skills -> skill
-    return t
+def jd_resume_features(job_desc: str, resume_text: str) -> dict:
+    jd = job_desc.lower()
+    res = resume_text.lower()
 
+    # Tokens
+    jd_tokens = set(re.findall(r"\b[a-z]{3,}\b", jd))
+    res_tokens = set(re.findall(r"\b[a-z]{3,}\b", res))
 
-def tokenize_and_normalize(text: str) -> list[str]:
-    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9\+\-#\.]{1,}", text)
-    return [normalize_token(t) for t in raw if normalize_token(t) and normalize_token(t) not in STOP_BASIC]
+    common_tokens = jd_tokens & res_tokens
+    overlap_ratio = len(common_tokens) / max(1, len(jd_tokens))
 
+    # Important JD words (JD-driven skills)
+    stop = {"and", "the", "for", "with", "from", "that", "this", "have", "able", "will"}
+    jd_keywords = [t for t in jd_tokens if len(t) > 3 and t not in stop]
+    keyword_hits = sum(1 for t in jd_keywords if t in res_tokens)
 
-# ---------- JD parsing ----------
+    # Experience
+    exp_months = estimate_experience_months(res)
 
-def parse_job_requirements(job_desc: str) -> dict:
-    jd_lower = job_desc.lower()
+    # Education
+    has_degree = bool(
+        re.search(
+            r"\b(bachelor|master|b\.tech|btech|mca|bca|bsc|msc|bba|mba|diploma|degree)\b",
+            res,
+        )
+    )
+    education_score = 1 if has_degree else 0
 
-    must_raw: list[str] = []
-    nice_raw: list[str] = []
-
-    # 1) Line-based parsing (handles "Required:", "Nice to have:", etc.). [web:272]
-    lines = [ln.strip() for ln in jd_lower.splitlines() if ln.strip()]
-    current_block = None  # "required" | "nice"
-    for ln in lines:
-        header_hit = False
-        if ln.startswith("required") or "must have" in ln or "must-have" in ln:
-            current_block = "required"
-            ln = re.sub(r"required[:\-]?", "", ln)
-            header_hit = True
-        elif "nice to have" in ln or "preferred" in ln or "bonus" in ln:
-            current_block = "nice"
-            ln = re.sub(r"(nice to have|preferred|bonus)[:\-]?", "", ln)
-            header_hit = True
-
-        if ln.startswith(("- ", "* ", "• ")):
-            ln = ln[2:].strip()
-
-        if current_block:
-            if header_hit and not ln:
-                continue
-            parts = re.split(r"[,/]| and ", ln)
-            for p in parts:
-                tok = p.strip(" -.")
-                if len(tok) > 2:
-                    if current_block == "required":
-                        must_raw.append(tok)
-                    else:
-                        nice_raw.append(tok)
-
-    # 2) Regex-based backup for "Requirements:" paragraphs.
-    if not must_raw:
-        must_patterns = [
-            r"(?:required|must have|must-have|essential)\s*[:\-]?\s*([a-zA-Z0-9\s/,+\-]+?)(?:\.|;|\n|$)",
-            r"requirements?\s*[:\-]?\s*([a-zA-Z0-9\s/,+\-]+?)(?:\.|;|\n|$)",
-        ]
-        for pattern in must_patterns:
-            matches = re.findall(pattern, jd_lower, re.IGNORECASE)
-            for match in matches:
-                tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
-                must_raw.extend(tokens)
-
-    # 3) Fallback: use frequent tokens from whole JD if still nothing.
-    if not must_raw:
-        must_raw = tokenize_and_normalize(jd_lower)
-
-    # Normalize and dedupe.
-    must_norm = []
-    for phrase in must_raw:
-        toks = tokenize_and_normalize(phrase)
-        if not toks:
-            continue
-        # join multi-word skill back, e.g., "reactjs" or "restapi"
-        skill = "".join(toks)
-        if skill and skill not in must_norm and skill not in STOP_BASIC:
-            must_norm.append(skill)
-
-    nice_norm = []
-    for phrase in nice_raw:
-        toks = tokenize_and_normalize(phrase)
-        if not toks:
-            continue
-        skill = "".join(toks)
-        if skill and skill not in nice_norm and skill not in STOP_BASIC:
-            nice_norm.append(skill)
-
-    # Experience requirement
-    years_patterns = [
-        r"(\d+)\s*(?:\+?\s*)?(?:years?|yrs?)\s+(?:of\s+)?experience",
-        r"(?:experience|exp).*?(\d+)\s*(?:years?|yrs?)",
-    ]
-    min_years = 0
-    for pattern in years_patterns:
-        match = re.search(pattern, jd_lower)
-        if match:
-            min_years = max(min_years, int(match.group(1)))
+    # Projects / achievements
+    project_mentions = len(
+        re.findall(
+            r"\b(project|projects|built|developed|created|led|managed|implemented)\b",
+            res,
+        )
+    )
 
     return {
-        "must_haves": must_norm[:10],
-        "nice_haves": nice_norm[:8],
-        "min_years": min_years,
+        "jd_tokens": jd_tokens,
+        "res_tokens": res_tokens,
+        "jd_keywords": jd_keywords,
+        "overlap_ratio": overlap_ratio,      # 0–1
+        "keyword_hits": keyword_hits,        # 0+
+        "exp_months": exp_months,            # 0+
+        "education_score": education_score,  # 0/1
+        "project_mentions": project_mentions # 0+
     }
 
 
-# ---------- Resume experience ----------
+def compute_match_score(job_desc: str, resume_text: str) -> dict:
+    feats = jd_resume_features(job_desc, resume_text)
 
-def extract_resume_experience(resume_text: str) -> dict:
-    exp_dict: dict[str, float] = {}
-    patterns = [
-        r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:of\s+)?experience\s+(?:in|with)?\s*([a-zA-Z]+(?:\s[a-zA-Z]+)?)",
-        r"([a-zA-Z]+(?:\s[a-zA-Z]+)?)\s+(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:experience)?",
-    ]
-    resume_lower = resume_text.lower()
-    for pattern in patterns:
-        matches = re.finditer(pattern, resume_lower, re.IGNORECASE)
-        for match in matches:
-            try:
-                first = match.group(1).strip().lower()
-                second = match.group(2).strip().lower()
-                if re.match(r"\d", first):
-                    years = float(first)
-                    skill = second
-                else:
-                    skill = first
-                    years = float(second)
-                if len(skill) > 2:
-                    exp_dict[skill] = max(exp_dict.get(skill, 0.0), years)
-            except (IndexError, ValueError):
-                continue
-    return exp_dict
+    # Normalize pieces
+    exp_score = min(feats["exp_months"] / 36, 1.0)          # 3 years -> full exp
+    overlap_score = feats["overlap_ratio"]                  # already 0–1
+    keyword_score = min(feats["keyword_hits"] / 10, 1.0)    # cap at 10 keywords
+    project_score = min(feats["project_mentions"] / 5, 1.0) # cap at 5
+    edu_score = feats["education_score"]                    # 0 or 1
+
+    # Weighting (same as notebook)
+    final = (
+        0.30 * overlap_score +
+        0.20 * keyword_score +
+        0.25 * exp_score +
+        0.15 * project_score +
+        0.10 * edu_score
+    )
+
+    score_0_100 = round(final * 100, 1)
+
+    # Reasons
+    reasons = []
+    if exp_score > 0.6:
+        reasons.append(f"Solid experience (~{feats['exp_months']} months).")
+    elif exp_score > 0.2:
+        reasons.append(f"Some relevant experience (~{feats['exp_months']} months).")
+    else:
+        reasons.append("Little or no explicit experience mentioned.")
+
+    if overlap_score > 0.5:
+        reasons.append("Resume matches many terms from the job description.")
+    elif overlap_score > 0.25:
+        reasons.append("Moderate alignment with job description keywords.")
+    else:
+        reasons.append("Low keyword overlap with the job description.")
+
+    if project_score > 0.4:
+        reasons.append("Good number of projects/achievements listed.")
+    elif project_score == 0:
+        reasons.append("Few or no projects explicitly described.")
+
+    if edu_score == 1:
+        reasons.append("Relevant degree or education mentioned.")
+
+    # JD skills for Matched / Missing columns (up to 10)
+    jd_skills = feats["jd_keywords"][:10]
+    matched = [s for s in jd_skills if s in feats["res_tokens"]][:5]
+    missing = [s for s in jd_skills if s not in feats["res_tokens"]][:5]
+
+    return {
+        "score": score_0_100,
+        "features": feats,
+        "reasons": reasons,
+        "matched": matched,
+        "missing": missing,
+        "overlap_ratio": overlap_score,
+        "exp_months": feats["exp_months"],
+    }
 
 
-# ---------- Text cleaning for TF‑IDF ----------
-
-def clean_text_basic(text: str) -> str:
-    stop_words = set(stopwords.words("english"))
-    tokens = word_tokenize(text.lower())
-    return " ".join([t for t in tokens if t.isalpha() and t not in stop_words and len(t) > 2])
-
-
-# ---------- Scoring ----------
+# ---------- Main API used by your app ----------
 
 def score_resume_ml(resume_text: str, job_desc: str) -> dict:
-    resume_clean = clean_text_basic(resume_text)
-    jd_clean = clean_text_basic(job_desc)
+    """
+    Adapter so the rest of the code (screen_resumes + frontend) can stay the same.
+    """
+    result = compute_match_score(job_desc, resume_text)
 
-    if len(jd_clean.split()) < 3 or len(resume_clean.split()) < 3:
-        semantic_sim = 0.0
-    else:
-        vectorizer = TfidfVectorizer(max_features=800, ngram_range=(1, 2))
-        tfidf_matrix = vectorizer.fit_transform([jd_clean, resume_clean])
-        semantic_sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+    overall_score = int(result["score"])
 
-    jd_reqs = parse_job_requirements(job_desc)
-    resume_exp = extract_resume_experience(resume_text)
-
-    total_exp = sum(resume_exp.values())
-    if jd_reqs["min_years"] > 0:
-        exp_ratio = min(total_exp / jd_reqs["min_years"], 1.5)
-        exp_score = int(70 * exp_ratio)
-    else:
-        exp_score = int(min(total_exp, 3.0) / 3.0 * 70)
-
-    # Normalized token sets for matching.
-    resume_tokens = set(tokenize_and_normalize(resume_text))
-    matched_must_norm = [s for s in jd_reqs["must_haves"] if s in resume_tokens]
-    missing_must_norm = [s for s in jd_reqs["must_haves"] if s not in resume_tokens]
-
-    must_score = min(len(matched_must_norm) * 20, 60)
-
-    overall_score = (
-        semantic_sim * 100 * 0.55
-        + exp_score * 0.25
-        + must_score * 0.20
-    )
-    overall_score = int(max(0, min(100, overall_score)))
-
-    # For display, show normalized tokens as‑is (they already look like skills).
-    matched_display = matched_must_norm[:5]
-    missing_display = missing_must_norm[:5]
-
-    reasoning_parts = []
-    reasoning_parts.append(f"Semantic match: {semantic_sim:.1%}")
-    if jd_reqs["min_years"] > 0:
-        reasoning_parts.append(f"Experience: {total_exp:.1f} years (JD asks {jd_reqs['min_years']}+)")
-    else:
-        reasoning_parts.append(f"Experience: {total_exp:.1f} years (no strict min in JD)")
-    if matched_display:
-        reasoning_parts.append("Matched must‑have: " + ", ".join(matched_display[:3]))
-    if missing_display:
-        reasoning_parts.append("Missing: " + ", ".join(missing_display[:2]))
-
-    if missing_display and jd_reqs["min_years"] > 0 and total_exp < jd_reqs["min_years"] * 0.6:
-        overall_score = min(overall_score, 70)
+    # Map features into the fields your frontend expects
+    semantic_similarity = float(result["overlap_ratio"] * 100.0)  # use overlap as "semantic"
+    exp_months = result["exp_months"]
+    # simple exp_score 0–100 relative to 36 months, same as compute_match_score
+    exp_score = int(min(exp_months / 36.0, 1.0) * 100)
 
     return {
         "overall_score": overall_score,
-        "semantic_similarity": float(semantic_sim * 100),
-        "exp_score": int(exp_score),
-        "matched_must": matched_display,
-        "missing_must": missing_display,
-        "reasoning": "; ".join(reasoning_parts),
-        "total_exp": float(total_exp),
+        "semantic_similarity": semantic_similarity,
+        "exp_score": exp_score,
+        "matched_must": result["matched"],
+        "missing_must": result["missing"],
+        "reasoning": " ".join(result["reasons"]),
+        "total_exp": float(exp_months / 12.0),  # years, for info only
     }
 
-
-# ---------- Main screening ----------
 
 def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> dict:
     try:
@@ -326,8 +241,8 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
             "strong_candidates": strong_count,
             "ranking": results[:25],
             "insights": [
-                f"AI screened {len(results)} resumes using TF‑IDF semantic match + rules",
-                f"Avg semantic match: {avg_sem:.0f}%",
+                f"AI screened {len(results)} resumes using JD keyword overlap + rules",
+                f"Avg JD keyword overlap: {avg_sem:.0f}%",
             ],
             "summary": f"Top: {results[0]['file_name']} ({results[0]['overall_score']}%) - {results[0]['reasoning']}",
         }
