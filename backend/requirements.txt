@@ -9,3 +9,5 @@ regex
 scipy
 joblib
 chardet
+rake-nltk
+python-docx

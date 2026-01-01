@@ -7,7 +7,13 @@ import toast from 'react-hot-toast'
 
 const MAX_FILE_MB = 5
 const MAX_FILES = 100
-const ALLOWED_TYPES = ['application/pdf', 'text/plain']
+
+// Add DOCX support (browser MIME can vary, so also check extension)
+const ALLOWED_TYPES = [
+  'application/pdf',
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]
 
 // Support BOTH old (score/matched_skills) + new ML (overall_score/semantic_similarity)
 type Candidate = {
@@ -32,6 +38,7 @@ type ScreenerResult = {
   execution_id: string
   total_resumes: number
   strong_candidates: number
+  strong_threshold?: number // NEW (backend can send this)
   ranking: Candidate[]
   insights: string[]
   summary: string
@@ -42,10 +49,10 @@ type ScreenerResult = {
 const getScore = (c: Candidate): number => c.overall_score ?? c.score ?? 0
 
 const getMatched = (c: Candidate): string[] =>
-  (c.matched_must ?? c.matched_skills ?? []).slice(0, 3)
+  (c.matched_must ?? c.matched_skills ?? []).slice(0, 5)
 
 const getMissing = (c: Candidate): string[] =>
-  (c.missing_must ?? c.missing_skills ?? []).slice(0, 3)
+  (c.missing_must ?? c.missing_skills ?? []).slice(0, 5)
 
 const getSemantic = (c: Candidate): number => c.semantic_similarity ?? 0
 
@@ -80,14 +87,18 @@ export default function ResumeScreenerPage() {
         setFiles(null)
         return
       }
-      if (!ALLOWED_TYPES.includes(f.type)) {
-        const name = f.name.toLowerCase()
-        if (!name.endsWith('.pdf') && !name.endsWith('.txt')) {
-          toast.error(`"${f.name}" must be PDF or TXT`)
-          e.target.value = ''
-          setFiles(null)
-          return
-        }
+
+      const name = f.name.toLowerCase()
+      const extOk = name.endsWith('.pdf') || name.endsWith('.txt') || name.endsWith('.docx')
+
+      // Some browsers return empty/odd MIME types for .docx, so allow by extension too
+      const mimeOk = ALLOWED_TYPES.includes(f.type) || f.type === '' || f.type === 'application/octet-stream'
+
+      if (!extOk || !mimeOk) {
+        toast.error(`"${f.name}" must be PDF, TXT, or DOCX`)
+        e.target.value = ''
+        setFiles(null)
+        return
       }
     }
 
@@ -144,6 +155,8 @@ export default function ResumeScreenerPage() {
     }
   }
 
+  const strongLabel = result?.strong_threshold ? `≥ ${result.strong_threshold}%` : '70%+'
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50/50 p-6">
       <div className="max-w-7xl mx-auto space-y-8">
@@ -156,7 +169,7 @@ export default function ResumeScreenerPage() {
             </h1>
           </div>
           <p className="text-xl text-slate-600 max-w-3xl mx-auto leading-relaxed">
-            Upload resumes + job description → AI semantic matching + experience parsing → ranked candidates in seconds.
+            Upload resumes + job description → AI skill coverage + semantic similarity + experience signals → ranked candidates in seconds.
           </p>
         </div>
 
@@ -167,11 +180,12 @@ export default function ResumeScreenerPage() {
             <h3 className="text-2xl font-bold text-slate-900 mb-6 flex items-center gap-3">
               📄 Upload Resumes
             </h3>
+
             <div className="space-y-4">
               <div className="border-2 border-dashed rounded-2xl p-8 text-center transition-all hover:border-indigo-400 hover:bg-indigo-50/50">
                 <input
                   type="file"
-                  accept=".pdf,.txt"
+                  accept=".pdf,.txt,.docx"
                   multiple
                   onChange={handleFilesChange}
                   className="hidden"
@@ -185,14 +199,14 @@ export default function ResumeScreenerPage() {
                     <div>
                       <p className="font-semibold text-slate-900">{files.length} resumes selected</p>
                       <p className="text-sm text-indigo-700">
-                        PDF/TXT • Max {MAX_FILES} files • {MAX_FILE_MB}MB each
+                        PDF/TXT/DOCX • Max {MAX_FILES} files • {MAX_FILE_MB}MB each
                       </p>
                     </div>
                   ) : (
                     <div>
                       <p className="text-lg font-semibold text-slate-900 mb-1">Drop resumes or click</p>
                       <p className="text-sm text-slate-500">
-                        PDF or TXT • Max {MAX_FILES} files • {MAX_FILE_MB}MB each
+                        PDF/TXT/DOCX • Max {MAX_FILES} files • {MAX_FILE_MB}MB each
                       </p>
                     </div>
                   )}
@@ -243,24 +257,30 @@ export default function ResumeScreenerPage() {
                 <p className="text-xs uppercase tracking-wide text-slate-500 mb-1">
                   Total resumes
                 </p>
-                <p className="text-2xl font-bold text-slate-900">
-                  {result.total_resumes}
-                </p>
+                <p className="text-2xl font-bold text-slate-900">{result.total_resumes}</p>
               </div>
+
               <div className="bg-white/90 border border-emerald-100 rounded-2xl p-5 shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-emerald-600 mb-1">
-                  Strong candidates (70%+)
+                  Strong candidates ({strongLabel})
                 </p>
-                <p className="text-2xl font-bold text-emerald-700">
-                  {result.strong_candidates}
-                </p>
+                <p className="text-2xl font-bold text-emerald-700">{result.strong_candidates}</p>
               </div>
+
               <div className="bg-white/90 border border-indigo-100 rounded-2xl p-5 shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-indigo-600 mb-1">
-                  Summary
-                </p>
+                <p className="text-xs uppercase tracking-wide text-indigo-600 mb-1">Summary</p>
                 <p className="text-sm text-slate-800 line-clamp-2">{result.summary}</p>
               </div>
+            </div>
+
+            {/* How scoring works */}
+            <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">How scoring works</h3>
+              <ul className="list-disc list-inside text-sm text-slate-700 space-y-1">
+                <li>Overall score is conservative and combines JD skill coverage, TF‑IDF semantic similarity, and experience/projects/education signals.</li>
+                <li>Matched/Missing shows key JD skills found/not found in each resume (phrases like “Power BI”, “Full Stack”, “REST API”).</li>
+                <li>“Strong candidates” uses the threshold shown above (often top ~20% for the current JD).</li>
+              </ul>
             </div>
 
             {/* Insights */}
@@ -277,9 +297,7 @@ export default function ResumeScreenerPage() {
 
             {/* Ranking table */}
             <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm overflow-x-auto">
-              <h3 className="text-sm font-semibold text-slate-900 mb-4">
-                Ranked candidates
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-900 mb-4">Ranked candidates</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -294,34 +312,38 @@ export default function ResumeScreenerPage() {
                       <th className="text-left py-3 px-3 font-semibold text-slate-700">Reasoning</th>
                     </tr>
                   </thead>
+
                   <tbody>
-                    {result.ranking && result.ranking.length > 0 ? (
+                    {result.ranking?.length ? (
                       result.ranking.map((c) => (
                         <tr
                           key={`${c.rank}-${c.file_name}`}
                           className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors"
                         >
-                          <td className="py-3 px-3 font-bold text-slate-900">
-                            #{c.rank}
-                          </td>
+                          <td className="py-3 px-3 font-bold text-slate-900">#{c.rank}</td>
+
                           <td className="py-3 px-3 text-slate-800 truncate max-w-xs">
                             {c.file_name}
                           </td>
+
                           <td className="py-3 px-3 text-center">
                             <span className="inline-flex items-center justify-center px-2 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700 min-w-12">
                               {getScore(c)}%
                             </span>
                           </td>
+
                           <td className="py-3 px-3 text-center">
                             <span className="text-slate-600 text-xs font-medium">
                               {getSemantic(c).toFixed(1)}%
                             </span>
                           </td>
+
                           <td className="py-3 px-3 text-center">
                             <span className="text-slate-600 text-xs font-medium">
                               {getExpScore(c)}%
                             </span>
                           </td>
+
                           <td className="py-3 px-3 text-slate-700 text-xs">
                             {getMatched(c).length > 0 ? (
                               <div className="flex flex-wrap gap-1">
@@ -338,6 +360,7 @@ export default function ResumeScreenerPage() {
                               <span className="text-slate-400">—</span>
                             )}
                           </td>
+
                           <td className="py-3 px-3 text-slate-700 text-xs">
                             {getMissing(c).length > 0 ? (
                               <div className="flex flex-wrap gap-1">
@@ -354,6 +377,7 @@ export default function ResumeScreenerPage() {
                               <span className="text-slate-400">—</span>
                             )}
                           </td>
+
                           <td className="py-3 px-3 text-slate-700 text-xs max-w-sm truncate">
                             {c.reasoning || 'Analyzed'}
                           </td>
