@@ -13,3 +13,7 @@ backend/temp/
 backend/ai_workers/*.pkl
 backend/ai_workers/*.bak
 NUL
+Resumebottraining.ipynb
+Untitled.ipynb
+*.csv
+node_modules/
