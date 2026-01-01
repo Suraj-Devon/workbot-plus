@@ -38,30 +38,18 @@ type ScreenerResult = {
   error?: string
 }
 
-// Helper: Get score (handles both old + new)
-const getScore = (c: Candidate): number => {
-  return c.overall_score ?? c.score ?? 0
-}
+// Helpers
+const getScore = (c: Candidate): number => c.overall_score ?? c.score ?? 0
 
-// Helper: Get matched (handles both old + new)
-const getMatched = (c: Candidate): string[] => {
-  return (c.matched_must ?? c.matched_skills ?? []).slice(0, 3)
-}
+const getMatched = (c: Candidate): string[] =>
+  (c.matched_must ?? c.matched_skills ?? []).slice(0, 3)
 
-// Helper: Get missing (handles both old + new)
-const getMissing = (c: Candidate): string[] => {
-  return (c.missing_must ?? c.missing_skills ?? []).slice(0, 3)
-}
+const getMissing = (c: Candidate): string[] =>
+  (c.missing_must ?? c.missing_skills ?? []).slice(0, 3)
 
-// Helper: Get semantic similarity (new ML field)
-const getSemantic = (c: Candidate): number => {
-  return c.semantic_similarity ?? 0
-}
+const getSemantic = (c: Candidate): number => c.semantic_similarity ?? 0
 
-// Helper: Get exp score (new ML field)
-const getExpScore = (c: Candidate): number => {
-  return c.exp_score ?? 0
-}
+const getExpScore = (c: Candidate): number => c.exp_score ?? 0
 
 export default function ResumeScreenerPage() {
   const { user } = useAuth()
@@ -287,7 +275,7 @@ export default function ResumeScreenerPage() {
               </div>
             )}
 
-            {/* Ranking table - FIXED FOR ML */}
+            {/* Ranking table */}
             <div className="bg-white/90 border border-slate-100 rounded-2xl p-5 shadow-sm overflow-x-auto">
               <h3 className="text-sm font-semibold text-slate-900 mb-4">
                 Ranked candidates
@@ -302,6 +290,7 @@ export default function ResumeScreenerPage() {
                       <th className="text-center py-3 px-3 font-semibold text-slate-700">Semantic</th>
                       <th className="text-center py-3 px-3 font-semibold text-slate-700">Exp</th>
                       <th className="text-left py-3 px-3 font-semibold text-slate-700">Matched</th>
+                      <th className="text-left py-3 px-3 font-semibold text-slate-700">Missing</th>
                       <th className="text-left py-3 px-3 font-semibold text-slate-700">Reasoning</th>
                     </tr>
                   </thead>
@@ -349,6 +338,22 @@ export default function ResumeScreenerPage() {
                               <span className="text-slate-400">—</span>
                             )}
                           </td>
+                          <td className="py-3 px-3 text-slate-700 text-xs">
+                            {getMissing(c).length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {getMissing(c).map((skill, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="bg-rose-50 text-rose-700 px-2 py-1 rounded text-xs font-medium"
+                                  >
+                                    {skill}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
                           <td className="py-3 px-3 text-slate-700 text-xs max-w-sm truncate">
                             {c.reasoning || 'Analyzed'}
                           </td>
@@ -356,7 +361,7 @@ export default function ResumeScreenerPage() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={7} className="py-4 text-center text-slate-500">
+                        <td colSpan={8} className="py-4 text-center text-slate-500">
                           No results
                         </td>
                       </tr>

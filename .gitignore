@@ -6,3 +6,10 @@ frontend/.env.local
 dist
 .next
 uploads
+.ipynb_checkpoints/
+venv/
+Resumes/
+backend/temp/
+backend/ai_workers/*.pkl
+backend/ai_workers/*.bak
+NUL

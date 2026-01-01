@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet'); // NEW
+const helmet = require('helmet');
 const db = require('./src/models/database');
 const authRoutes = require('./src/routes/auth');
 const botsRoutes = require('./src/routes/bots');
@@ -9,10 +9,26 @@ const botsRoutes = require('./src/routes/bots');
 const app = express();
 
 // Security & CORS
-app.use(helmet()); // secure headers
+app.use(helmet());
+
+// allowed frontend origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://workbot-plus.vercel.app', // Vercel frontend
+];
+
 app.use(
   cors({
-    origin: process.env.CLIENT_ORIGIN || 'http://localhost:3000',
+    origin: (origin, callback) => {
+      // allow mobile apps / curl / Postman with no origin
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
   })
 );
