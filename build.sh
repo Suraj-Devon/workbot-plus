@@ -5,5 +5,5 @@ python -c "
 import nltk
 nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
-print('NLTK data downloaded')
+print('✅ All Python deps installed + NLTK ready')
 "

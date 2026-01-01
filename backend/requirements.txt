@@ -1,13 +1,6 @@
-pandas
 numpy
 scikit-learn
-matplotlib
-plotly
-PyPDF2
-nltk
-regex
-scipy
-joblib
-chardet
 rake-nltk
 python-docx
+nltk
+pandas
