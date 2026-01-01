@@ -36,20 +36,83 @@ def extract_text_from_file(file_path: str) -> str:
         return ""
 
 
+def _tokenize_simple(text: str):
+    return re.findall(r"[a-zA-Z][a-zA-Z0-9\+\-#\.]{1,}", text.lower())
+
+
 def parse_job_requirements(job_desc: str) -> dict:
+    """
+    1) Try to read explicit 'Required' / 'Nice to have' sections.
+    2) If nothing is found, fall back to extracting frequent keyword-like tokens
+       from the whole JD as generic must_haves.
+    This keeps HR free to paste any JD (manual or AI-generated). [web:272][web:277]
+    """
     jd_lower = job_desc.lower()
 
-    must_haves = []
-    must_patterns = [
-        r"(?:required|must have|must-have|essential).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
-        r"requirements?:\s*([a-zA-Z0-9\s/,+-]+)(?:\.|;|\n|$)",
+    must_haves: list[str] = []
+    nice_haves: list[str] = []
+
+    # --- 1. Line-based parsing for common JD formats ---
+    lines = [ln.strip() for ln in jd_lower.splitlines() if ln.strip()]
+    current_block = None  # "required" | "nice"
+    for ln in lines:
+        if ln.startswith("required") or "must have" in ln or "must-have" in ln:
+            current_block = "required"
+            # drop header text like "required:" itself
+            ln = re.sub(r"required[:\-]?", "", ln)
+        elif "nice to have" in ln or "preferred" in ln or "bonus" in ln:
+            current_block = "nice"
+            ln = re.sub(r"(nice to have|preferred|bonus)[:\-]?", "", ln)
+        # bullet lines
+        if ln.startswith(("- ", "* ", "• ")):
+            ln = ln[2:].strip()
+        if current_block:
+            # split by commas or "and"
+            parts = re.split(r"[,/]| and ", ln)
+            for p in parts:
+                tok = p.strip(" -.")
+                if len(tok) > 2:
+                    if current_block == "required":
+                        must_haves.append(tok)
+                    else:
+                        nice_haves.append(tok)
+
+    # --- 2. Regex-based backup if line scan failed ---
+    if not must_haves:
+        must_patterns = [
+            r"(?:required|must have|must-have|essential).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
+            r"requirements?:\s*([a-zA-Z0-9\s/,+-]+)(?:\.|;|\n|$)",
+        ]
+        for pattern in must_patterns:
+            matches = re.findall(pattern, jd_lower, re.IGNORECASE)
+            for match in matches:
+                tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
+                must_haves.extend(tokens)
+
+    nice_patterns = [
+        r"(?:nice to have|preferred|bonus).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
     ]
-    for pattern in must_patterns:
+    for pattern in nice_patterns:
         matches = re.findall(pattern, jd_lower, re.IGNORECASE)
         for match in matches:
             tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
-            must_haves.extend(tokens)
+            nice_haves.extend(tokens)
 
+    # --- 3. Fallback: generic keyword extraction from entire JD ---
+    if not must_haves:
+        tokens = _tokenize_simple(jd_lower)
+        stop = {"and", "the", "for", "with", "from", "that", "this", "will", "you"}
+        # keep tokens that look like skills/technologies
+        skills_like = [
+            t for t in tokens
+            if len(t) > 2
+            and t not in stop
+            and not t.isdigit()
+        ]
+        # de‑duplicate and take top N
+        must_haves = list(dict.fromkeys(skills_like))[:10]
+
+    # --- 4. Experience requirement ---
     years_patterns = [
         r"(\d+)\s*(?:\+?\s*)?(?:years?|yrs?)\s+(?:of\s+)?experience",
         r"(?:experience|exp).*?(\d+)\s*(?:years?|yrs?)",
@@ -60,25 +123,15 @@ def parse_job_requirements(job_desc: str) -> dict:
         if match:
             min_years = max(min_years, int(match.group(1)))
 
-    nice_haves = []
-    nice_patterns = [
-        r"(?:nice to have|preferred|bonus).*?([a-zA-Z\s/,+]+?)(?:\.|;|\n|$)",
-    ]
-    for pattern in nice_patterns:
-        matches = re.findall(pattern, jd_lower, re.IGNORECASE)
-        for match in matches:
-            tokens = [s.strip() for s in re.split(r"[,/]", match) if len(s.strip()) > 2]
-            nice_haves.extend(tokens)
-
     return {
-        "must_haves": list(dict.fromkeys(must_haves))[:8],
+        "must_haves": list(dict.fromkeys(must_haves))[:10],
         "nice_haves": list(dict.fromkeys(nice_haves))[:8],
         "min_years": min_years,
     }
 
 
 def extract_resume_experience(resume_text: str) -> dict:
-    exp_dict = {}
+    exp_dict: dict[str, float] = {}
     patterns = [
         r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:of\s+)?experience\s+(?:in|with)?\s*([a-zA-Z]+(?:\s[a-zA-Z]+)?)",
         r"([a-zA-Z]+(?:\s[a-zA-Z]+)?)\s+(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:experience)?",
