@@ -1,4 +1,4 @@
-const { execFile } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
@@ -7,7 +7,7 @@ const db = require('../models/database');
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
 const TIMEOUT_MS = Number(process.env.DATA_ANALYST_TIMEOUT_MS || 60000);
 
-// Important for JSON-heavy stdout; otherwise can throw "maxBuffer exceeded". [web:223]
+// Keep for backwards compatibility (not used by spawn, but keep env contract)
 const MAX_BUFFER_BYTES = Number(process.env.DATA_ANALYST_MAX_BUFFER || 10 * 1024 * 1024); // 10MB
 
 // Server-side guard (never trust the client limit)
@@ -17,11 +17,9 @@ function safeParsePythonJson(stdout) {
   const text = (stdout || '').toString().trim();
   if (!text) return null;
 
-  // Most common: clean JSON only
   try {
     return JSON.parse(text);
   } catch (_) {
-    // Defensive: if any logs slip in, attempt to extract the JSON object
     const first = text.indexOf('{');
     const last = text.lastIndexOf('}');
     if (first >= 0 && last > first) {
@@ -29,6 +27,11 @@ function safeParsePythonJson(stdout) {
     }
     throw new Error('Python output was not valid JSON');
   }
+}
+
+function truncate(s, n = 2000) {
+  const t = (s || '').toString();
+  return t.length > n ? t.slice(0, n) : t;
 }
 
 /**
@@ -81,108 +84,167 @@ const analyzeData = async (filePath, userId, executionId) => {
             });
           }
         } catch (e) {
-          // Not fatal
           console.warn('File stat warning:', e?.message);
         }
 
         const pythonScript = path.join(__dirname, '../../ai_workers/data_analyst_bot.py');
 
-        // Mark as running (optional but helpful)
+        // Mark as running
         await db.query(
           `UPDATE bot_executions SET status = $1 WHERE id = $2`,
           ['running', executionId]
         );
 
-        // Use execFile with args array (avoid shell string). [web:228][web:233]
         const args = [pythonScript, filePath, executionId];
 
-        execFile(
-          PYTHON_BIN,
-          args,
-          { timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER_BYTES, windowsHide: true },
-          async (error, stdout, stderr) => {
-            try {
-              if (error) {
-                const msg = (stderr || error.message || 'Python execution error').toString();
+        // Use spawn to avoid maxBuffer issues and to capture stderr properly. [web:228]
+        const child = spawn(PYTHON_BIN, args, {
+          windowsHide: true,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
 
-                await db.query(
-                  `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-                  ['failed', msg.slice(0, 2000), executionId]
-                );
+        let stdout = '';
+        let stderr = '';
 
-                return resolve({
-                  success: false,
-                  executionId,
-                  error: 'Analysis failed',
-                  message: msg,
-                });
-              }
+        // Optional soft cap to avoid huge memory usage if python prints too much
+        const SOFT_STDOUT_CAP = MAX_BUFFER_BYTES; // reuse your env var as a cap
+        const SOFT_STDERR_CAP = 2 * 1024 * 1024;
 
-              if (!stdout) {
-                await db.query(
-                  `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-                  ['failed', 'Python returned empty output', executionId]
-                );
+        const timeout = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch (_) {}
 
-                return resolve({
-                  success: false,
-                  executionId,
-                  error: 'No output',
-                  message: 'Python script returned empty output',
-                });
-              }
+          // DB update on timeout
+          db.query(
+            `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
+            ['failed', `Timed out after ${TIMEOUT_MS}ms`, executionId]
+          ).catch(() => {});
 
-              const result = safeParsePythonJson(stdout);
+          return resolve({
+            success: false,
+            executionId,
+            error: 'Analysis failed',
+            message: `Timed out after ${TIMEOUT_MS}ms`,
+          });
+        }, TIMEOUT_MS);
 
-              if (!result || typeof result !== 'object') {
-                await db.query(
-                  `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-                  ['failed', 'Python output parse failed', executionId]
-                );
+        child.stdout.on('data', (d) => {
+          if (stdout.length < SOFT_STDOUT_CAP) stdout += d.toString();
+        });
 
-                return resolve({
-                  success: false,
-                  executionId,
-                  error: 'Invalid output',
-                  message: 'Python output could not be parsed',
-                });
-              }
+        child.stderr.on('data', (d) => {
+          if (stderr.length < SOFT_STDERR_CAP) stderr += d.toString();
+        });
 
-              // Store results (even if Python success=false; helps debugging + history)
-              await db.query(
-                `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
-                 VALUES ($1, $2, $3, $4, NOW())`,
-                [uuidv4(), executionId, result, result.summary || 'Analysis complete']
-              );
+        child.on('error', async (err) => {
+          clearTimeout(timeout);
 
-              const status = result.success === false ? 'failed' : 'completed';
-              await db.query(
-                `UPDATE bot_executions SET status = $1, completed_at = NOW(), error_message = NULL WHERE id = $2`,
-                [status, executionId]
-              );
+          const msg = truncate(err?.message || 'Python spawn error');
+          await db.query(
+            `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
+            ['failed', msg, executionId]
+          );
 
-              return resolve({
-                success: status === 'completed',
-                executionId,
-                data: result,
-              });
-            } catch (err) {
-              console.error('Result handling error:', err);
+          return resolve({
+            success: false,
+            executionId,
+            error: 'Analysis failed',
+            message: msg,
+          });
+        });
 
+        child.on('close', async (code) => {
+          clearTimeout(timeout);
+
+          // If python failed, use stderr first (real reason), then stdout fallback
+          if (code !== 0) {
+            const msg = truncate(stderr || stdout || `Python exited with code ${code}`);
+            await db.query(
+              `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
+              ['failed', msg, executionId]
+            );
+
+            // This prints in Render logs, making debugging easy. [web:763]
+            console.error('Data analyst python failed:', { executionId, code, msg });
+
+            return resolve({
+              success: false,
+              executionId,
+              error: 'Analysis failed',
+              message: msg,
+            });
+          }
+
+          if (!stdout) {
+            await db.query(
+              `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
+              ['failed', 'Python returned empty output', executionId]
+            );
+
+            return resolve({
+              success: false,
+              executionId,
+              error: 'No output',
+              message: 'Python script returned empty output',
+            });
+          }
+
+          try {
+            const result = safeParsePythonJson(stdout);
+
+            if (!result || typeof result !== 'object') {
               await db.query(
                 `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-                ['failed', err.message.slice(0, 2000), executionId]
+                ['failed', 'Python output parse failed', executionId]
               );
 
               return resolve({
                 success: false,
                 executionId,
-                error: 'Failed to process results',
-                message: err.message,
+                error: 'Invalid output',
+                message: 'Python output could not be parsed',
               });
             }
+
+            // Store results
+            await db.query(
+              `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
+               VALUES ($1, $2, $3, $4, NOW())`,
+              [uuidv4(), executionId, result, result.summary || 'Analysis complete']
+            );
+
+            const status = result.success === false ? 'failed' : 'completed';
+            await db.query(
+              `UPDATE bot_executions
+               SET status = $1, completed_at = NOW(), error_message = NULL
+               WHERE id = $2`,
+              [status, executionId]
+            );
+
+            return resolve({
+              success: status === 'completed',
+              executionId,
+              data: result,
+            });
+          } catch (err) {
+            console.error('Result handling error:', err);
+
+            const msg = truncate(err?.message || 'Failed to process results');
+            await db.query(
+              `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
+              ['failed', msg, executionId]
+            );
+
+            return resolve({
+              success: false,
+              executionId,
+              error: 'Failed to process results',
+              message: msg,
+            });
           }
-        );
+        });
       } catch (err) {
         console.error('Service error:', err);
 
@@ -190,7 +252,7 @@ const analyzeData = async (filePath, userId, executionId) => {
           try {
             await db.query(
               `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-              ['failed', err.message.slice(0, 2000), executionId]
+              ['failed', truncate(err.message), executionId]
             );
           } catch (_) {}
         }
