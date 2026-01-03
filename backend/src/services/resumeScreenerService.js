@@ -1,4 +1,4 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');  // Changed from 'exec'
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../models/database');
@@ -20,14 +20,10 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
       // Ensure temp dir exists (if used elsewhere)
       const tempDir = path.join(__dirname, '../../temp');
-      if (!require('fs').existsSync(tempDir)) {
-        require('fs').mkdirSync(tempDir, { recursive: true });
+      const fs = require('fs');
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
       }
-
-      // Escape quotes in job description for shell
-      const escapedJobDesc = jobDescription
-        .replace(/"/g, '\\"')
-        .replace(/'/g, "\\'");
 
       // Create an execution row first
       db.query(
@@ -36,17 +32,27 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
          RETURNING id`,
         [uuidv4(), userId || null, 'resume-screener', 'running']
       )
-        .then(({ rows }) => {
+        .then(async ({ rows }) => {
           const executionId = rows[0].id;
 
-          // Match Python script args exactly: upload_dir, job_description, execution_id
-          const command = `python "${pythonScript}" "${filesPath}" "${escapedJobDesc}" "${executionId}"`;
+          // FIXED: execFile with args array (no shell, no quoting problems!)
+          const pythonArgs = [
+            pythonScript,     // script path
+            filesPath,        // upload dir
+            jobDescription,   // raw JD text (multiline/quotes SAFE)
+            executionId       // execution ID
+          ];
 
-          console.log('Executing:', command);
+          console.log('Executing:', 'python', pythonArgs);  // logs args array
 
-          exec(
-            command,
-            { timeout: 120000, cwd: path.dirname(pythonScript) },
+          execFile(
+            'python',  // command
+            pythonArgs, // args array (safe!)
+            { 
+              timeout: 120000, 
+              cwd: path.dirname(pythonScript),
+              maxBuffer: 50 * 1024 * 1024  // 50MB for large outputs
+            },
             async (error, stdout, stderr) => {
               try {
                 if (error) {
@@ -55,8 +61,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2
-                     WHERE id = $1`,
+                     SET status = $2
+                   WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -70,8 +76,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
                 if (!stdout) {
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2
-                     WHERE id = $1`,
+                     SET status = $2
+                   WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -91,8 +97,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                   await db.query(
                     `UPDATE bot_executions
-                       SET status = $2
-                     WHERE id = $1`,
+                     SET status = $2
+                   WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -117,8 +123,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2
-                   WHERE id = $1`,
+                   SET status = $2
+                 WHERE id = $1`,
                   [executionId, 'completed']
                 );
 
@@ -133,8 +139,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                 await db.query(
                   `UPDATE bot_executions
-                     SET status = $2
-                   WHERE id = $1`,
+                   SET status = $2
+                 WHERE id = $1`,
                   [executionId, 'failed']
                 );
 
