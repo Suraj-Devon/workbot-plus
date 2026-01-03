@@ -5,7 +5,7 @@ import { useAuth } from '../../../../context/AuthContext'
 import api from './../../../../lib/api'
 import toast from 'react-hot-toast'
 
-const MAX_FILE_MB = 50
+const MAX_FILE_MB = 5
 const MAX_FILES = 300
 
 // Add DOCX support (browser MIME can vary, so also check extension)
