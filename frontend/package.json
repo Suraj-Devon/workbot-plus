@@ -18,17 +18,25 @@
     "react-dom": "19.2.3",
     "react-hot-toast": "^2.6.0",
     "react-leaflet": "^5.0.0",
-    "react-leaflet-cluster": "^3.1.0"
+    "react-leaflet-cluster": "3.1.1"
+  },
+  "overrides": {
+    "react-leaflet-cluster": {
+      "react": "$react",
+      "react-dom": "$react-dom",
+      "react-leaflet": "$react-leaflet"
+    }
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.21",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.20",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
-    "tailwindcss": "^3.4.14",
-    "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.14",
     "typescript": "^5"
   }
 }
