@@ -7,7 +7,13 @@ import toast from 'react-hot-toast'
 import DataAnalysisResult, { PythonAnalysis } from '../../../../components/DataAnalysisResult'
 
 const MAX_FILE_MB = 10
-const ALLOWED_TYPES = ['text/csv', 'application/json']
+
+// Browsers are inconsistent for JSONL MIME types, so we rely on extension fallback too.
+const ALLOWED_TYPES = [
+  'text/csv',
+  'application/json',
+  'application/x-ndjson',
+]
 
 export default function DataAnalystBotPage() {
   const { user } = useAuth()
@@ -31,15 +37,21 @@ export default function DataAnalystBotPage() {
       return
     }
 
-    if (!ALLOWED_TYPES.includes(f.type)) {
-      // Fallback check by extension
-      const name = f.name.toLowerCase()
-      if (!name.endsWith('.csv') && !name.endsWith('.json')) {
-        toast.error('Only CSV or JSON files are allowed')
-        e.target.value = ''
-        setFile(null)
-        return
-      }
+    // MIME can be empty/incorrect; validate by either MIME OR extension.
+    const name = f.name.toLowerCase()
+    const byExt =
+      name.endsWith('.csv') ||
+      name.endsWith('.json') ||
+      name.endsWith('.jsonl') ||
+      name.endsWith('.ndjson')
+
+    const byMime = ALLOWED_TYPES.includes(f.type)
+
+    if (!byMime && !byExt) {
+      toast.error('Only CSV, JSON, or JSONL (NDJSON) files are allowed')
+      e.target.value = ''
+      setFile(null)
+      return
     }
 
     setFile(f)
@@ -48,7 +60,7 @@ export default function DataAnalystBotPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
-      toast.error('Please choose a CSV or JSON file')
+      toast.error('Please choose a CSV, JSON, or JSONL file')
       return
     }
 
@@ -109,8 +121,9 @@ export default function DataAnalystBotPage() {
             <form onSubmit={handleSubmit} className="space-y-6">
               <div className="space-y-3">
                 <label className="block text-sm font-semibold text-slate-700">
-                  Data file (CSV or JSON)
+                  Data file (CSV, JSON, or JSONL)
                 </label>
+
                 <div
                   className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all ${
                     file
@@ -120,7 +133,7 @@ export default function DataAnalystBotPage() {
                 >
                   <input
                     type="file"
-                    accept=".csv,.json"
+                    accept=".csv,.json,.jsonl,.ndjson"
                     onChange={handleFileChange}
                     className="hidden"
                     id="file-upload"
@@ -139,9 +152,11 @@ export default function DataAnalystBotPage() {
                     ) : (
                       <div>
                         <p className="text-lg font-semibold text-slate-900 mb-1">
-                          Drop CSV/JSON or click to browse
+                          Drop CSV/JSON/JSONL or click to browse
                         </p>
-                        <p className="text-sm text-slate-500">Max {MAX_FILE_MB}MB - Secure processing</p>
+                        <p className="text-sm text-slate-500">
+                          Max {MAX_FILE_MB}MB - Secure processing
+                        </p>
                       </div>
                     )}
                   </label>
@@ -177,6 +192,9 @@ export default function DataAnalystBotPage() {
                 <li>• Key relationships & outliers</li>
                 <li>• Executive summary</li>
               </ul>
+              <p className="text-xs text-slate-500 mt-3">
+                Tip: JSONL/NDJSON is supported for large event-style exports.
+              </p>
             </div>
 
             {!analysis && (
