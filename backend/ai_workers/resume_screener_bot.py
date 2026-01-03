@@ -26,8 +26,11 @@ JD_SKILL_TOP_K = int(os.getenv("JD_SKILL_TOP_K", "30"))
 JD_SKILL_DENOM_CAP = int(os.getenv("JD_SKILL_DENOM_CAP", "10"))
 MAX_MONTHS_CAP = int(os.getenv("MAX_MONTHS_CAP", "480"))
 
-# If true, denominator prefers "Required" skills first (recommended)
+# If true, compute skill coverage ONLY on Required skills (recommended for production).
 PREFER_REQUIRED_DENOM = os.getenv("PREFER_REQUIRED_DENOM", "true").lower() in ("1", "true", "yes")
+
+# Strong candidate threshold: max(STRONG_MIN, 80th percentile)
+STRONG_MIN = int(os.getenv("STRONG_MIN", "60"))
 
 
 # ---------------- NLTK bootstrap ----------------
@@ -41,7 +44,7 @@ except LookupError:
 def build_stopwords():
     base = set(stopwords.words("english"))
     domain = {
-        "required", "requirements", "requirement", "must", "should", "nice", "preferred", "bonus", "plus",
+        "required", "requirements", "requirement", "must", "should", "nice", "preferred", "bonus", "plus", "optional",
         "strong", "good", "excellent",
         "experience", "experiences", "exp", "year", "years", "yrs", "yr", "month", "months",
         "skill", "skills",
@@ -52,10 +55,8 @@ def build_stopwords():
         "ability", "able",
         "summary", "objective", "profile", "education", "projects", "project", "certification", "certifications",
         "contact", "email", "phone", "address",
-        # generic tech filler
-        "knowledge", "hands", "hands-on", "hands-on experience", "hands on",
-        "familiar", "familiarity", "proficient", "proficiency",
-        "building", "implementing", "designing", "maintaining",
+        # often-noisy single tokens
+        "power",
     }
     return base.union(domain)
 
@@ -125,23 +126,19 @@ def normalize_text(t: str) -> str:
     # normalize dashes
     t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", t)
 
-    # normalize common variants
+    # common variants / OCR-ish fixes
+    t = re.sub(r"\bpower\s*bi\b", "power bi", t)
+    t = re.sub(r"\bpower\s*bl\b", "power bi", t)  # i/l confusion
+
     t = re.sub(r"\bnode\.?\s*js\b", "node js", t)
     t = re.sub(r"\breact\.?\s*js\b", "react", t)
-    t = re.sub(r"\bjavascript\b", "javascript", t)
-    t = re.sub(r"\bjs\b", "javascript", t)
+
     t = re.sub(r"\brest\s*api(s)?\b", "rest api", t)
 
     t = re.sub(r"\bpostgre\s*sql\b", "postgresql", t)
     t = re.sub(r"\bpostgre\b", "postgresql", t)
-
-    t = re.sub(r"\bmysql\b", "mysql", t)
     t = re.sub(r"\bpostgres\b", "postgresql", t)
-    t = re.sub(r"\bpostgresql\b", "postgresql", t)
 
-    # analytics (keep them too, since users can paste any JD)
-    t = re.sub(r"\bpower\s*bi\b", "power bi", t)
-    t = re.sub(r"\bpower\s*bl\b", "power bi", t)  # OCR-ish i/l confusion
     t = re.sub(r"\bms\s*excel\b", "excel", t)
     t = re.sub(r"\bmicrosoft\s*excel\b", "excel", t)
 
@@ -165,55 +162,57 @@ def simple_word_tokenizer(sentence: str):
 
 
 # ---------------- Canonical skill patterns (multi-domain) ----------------
-# Keep this list broad so any JD style works.
 SKILL_PATTERNS = {
-    # core dev
-    "javascript": r"\bjavascript\b",
+    # dev
+    "javascript": r"\bjavascript\b|\bjs\b",
     "typescript": r"\btypescript\b",
     "react": r"\breact\b",
     "node js": r"\bnode\s*js\b",
-    "express": r"\bexpress(\.js)?\b",
     "rest api": r"\brest\s*api\b",
     "graphql": r"\bgraphql\b",
-    "java": r"\bjava\b",
-    "spring": r"\bspring\b",
-    "spring boot": r"\bspring\s*boot\b",
 
-    # databases/cloud/devops
+    # databases/devops/cloud
     "mysql": r"\bmysql\b",
     "postgresql": r"\bpostgresql\b",
-    "mongodb": r"\bmongo(db)?\b",
-    "redis": r"\bredis\b",
-    "sql": r"\bsql\b",
     "relational database": r"\brelational\s*database(s)?\b|\brdbms\b",
-    "aws": r"\baws\b|\bamazon\s+web\s+services\b",
     "docker": r"\bdocker\b",
-    "kubernetes": r"\bkubernetes\b|\bk8s\b",
+    "aws": r"\baws\b|\bamazon\s+web\s+services\b",
 
-    # analytics/data (so same bot works for analyst JD)
+    # data/analytics
     "excel": r"\bexcel\b",
+    "sql": r"\bsql\b",
     "power bi": r"\bpower\s*bi\b|\bpower\s*bl\b",
     "tableau": r"\btableau\b",
+    "python": r"\bpython\b",
     "pandas": r"\bpandas\b",
     "numpy": r"\bnumpy\b",
-    "python": r"\bpython\b",
-    "etl": r"\betl\b",
-    "data cleaning": r"\bdata\s*clean(ing)?\b",
     "dashboard": r"\bdashboard(s)?\b",
+    "data cleaning": r"\bdata\s*clean(ing)?\b",
+    "a/b testing": r"\ba\/b\s*test(ing)?\b|\bab\s*test(ing)?\b",
+    "experiments": r"\bexperiment(s)?\b",
+
+    # talent/HR
+    "recruitment": r"\brecruit(ment|er|ing)?\b",
+    "sourcing": r"\bsourc(ing|e)\b",
+    "linkedin": r"\blinkedin\b",
+    "stakeholder management": r"\bstakeholder\s+management\b",
+    "ats": r"\bats\b|\bapplicant\s+tracking\s+system\b",
+    "workday": r"\bworkday\b",
+    "greenhouse": r"\bgreenhouse\b",
 }
 
-# preferred ordering when multiple skills exist
 CANONICAL_ORDER = [
-    # dev first
-    "javascript", "typescript", "react", "node js", "express", "rest api",
-    "mysql", "postgresql", "relational database",
-    "aws", "docker", "kubernetes",
+    # full stack
+    "javascript", "react", "node js", "rest api", "mysql", "postgresql", "relational database",
+    "aws", "docker", "typescript", "graphql",
     # data
-    "sql", "python", "pandas", "excel", "power bi", "tableau",
-    "etl", "data cleaning", "dashboard",
-    # other
-    "java", "spring", "spring boot", "graphql", "mongodb", "redis", "numpy",
+    "excel", "sql", "power bi", "tableau", "dashboard", "data cleaning", "python", "pandas", "numpy",
+    "a/b testing", "experiments",
+    # hr
+    "recruitment", "sourcing", "linkedin", "stakeholder management", "ats", "workday", "greenhouse",
 ]
+
+BANNED_SKILLS = {"power", "dashboards", "dashboarding", "bi tableau", "tableau dashboards", "sql power"}
 
 
 def _match_skill(skill: str, text_norm: str) -> bool:
@@ -238,7 +237,7 @@ def _clean_skill(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     if not s or re.fullmatch(r"\d+", s):
         return ""
-    if s in STOP_ALL:
+    if s in STOP_ALL or s in BANNED_SKILLS:
         return ""
     return s
 
@@ -258,13 +257,14 @@ def _expand_phrase_into_skills(phrase: str) -> list[str]:
     if not phrase:
         return []
 
-    # if phrase contains multiple canonicals, keep only canonicals to avoid noisy combos like "javascript react"
     canon_hits = _canonicals_in_phrase(phrase)
+
+    # If phrase contains 2+ canonicals (e.g., "excel sql power bi"), keep only canonicals.
     if len(canon_hits) >= 2:
         return canon_hits
 
-    # split on separators for bullet-style lines
-    parts = re.split(r"\s*(?:,|/|&|\band\b|\bor\b|\(|\)|:|;|\||\+)\s*", phrase)
+    # Split on common separators including " - " (handwritten JDs often use this)
+    parts = re.split(r"\s*(?:,|/|&|\band\b|\bor\b|\(|\)|:|;|\||\+|\s-\s)\s*", phrase)
     parts = [p.strip() for p in parts if p and p.strip()]
 
     out = []
@@ -272,22 +272,17 @@ def _expand_phrase_into_skills(phrase: str) -> list[str]:
         p = _clean_skill(p)
         if not p:
             continue
-        # keep short phrases only
         if len(p.split()) <= 3:
             out.append(p)
 
-    # add single canonical hit if present
     if len(canon_hits) == 1 and canon_hits[0] not in out:
         out.insert(0, canon_hits[0])
 
-    # de-dupe preserve order
-    merged = []
-    seen = set()
+    # de-dupe
+    merged, seen = [], set()
     for x in out:
         x = _clean_skill(x)
         if not x or x in seen:
-            continue
-        if x in {"developer", "engineer", "analyst", "full stack", "fullstack", "web developer"}:
             continue
         merged.append(x)
         seen.add(x)
@@ -295,13 +290,19 @@ def _expand_phrase_into_skills(phrase: str) -> list[str]:
 
 
 # ---------------- JD section parsing (Required vs Nice) ----------------
+REQ_HEAD = re.compile(r"^\s*(required|must have|must-have|requirements)\s*:?\s*(.*)$", re.IGNORECASE)
+NICE_HEAD = re.compile(r"^\s*(nice to have|nice-to-have|preferred|bonus|optional|plus)\s*:?\s*(.*)$", re.IGNORECASE)
+
+
 def split_jd_sections(job_desc: str) -> dict:
     """
-    Very forgiving: works for handwritten or AI-written JDs.
-    Returns dict with: all, required, nice.
+    Works for:
+    - AI-written JDs with headings
+    - handwritten JDs like 'Nice: Python pandas' (inline content)
+    - long paragraph JDs (falls back to all as required)
     """
     raw = job_desc or ""
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
     if not lines:
         return {"all": raw, "required": raw, "nice": ""}
 
@@ -310,16 +311,22 @@ def split_jd_sections(job_desc: str) -> dict:
     bucket = "required"
 
     for ln in lines:
-        ln_l = ln.lower()
-
-        if re.search(r"\b(required|must have|must-have|requirements)\b", ln_l):
+        m_req = REQ_HEAD.match(ln)
+        if m_req:
             bucket = "required"
-            continue
-        if re.search(r"\b(nice to have|nice-to-have|preferred|bonus|optional|plus)\b", ln_l):
-            bucket = "nice"
+            tail = (m_req.group(2) or "").strip()
+            if tail:
+                required_lines.append(tail)
             continue
 
-        # keep line
+        m_nice = NICE_HEAD.match(ln)
+        if m_nice:
+            bucket = "nice"
+            tail = (m_nice.group(2) or "").strip()
+            if tail:
+                nice_lines.append(tail)
+            continue
+
         if bucket == "nice":
             nice_lines.append(ln)
         else:
@@ -330,43 +337,54 @@ def split_jd_sections(job_desc: str) -> dict:
     return {"all": raw, "required": required, "nice": nice}
 
 
-def extract_bullets(text: str) -> list[str]:
+def extract_bullets_or_lines(text: str) -> list[str]:
+    """
+    Returns a list of candidate skill lines/phrases from a JD section.
+    """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    bullets = []
+    out = []
     for ln in lines:
+        # bullets
         if re.match(r"^[-*•]\s+", ln):
-            bullets.append(re.sub(r"^[-*•]\s+", "", ln).strip())
-    return bullets
+            out.append(re.sub(r"^[-*•]\s+", "", ln).strip())
+            continue
+        # comma-separated skill lines
+        if "," in ln or " or " in ln.lower() or " and " in ln.lower() or " - " in ln:
+            out.append(ln)
+            continue
+        # short plain lines (handwritten)
+        if len(ln.split()) <= 12:
+            out.append(ln)
+    return out
 
 
 # ---------------- JD skill extraction ----------------
-def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 30) -> list[str]:
-    jd_all = normalize_text(job_desc)
+def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 30) -> tuple[list[str], int]:
     sec = split_jd_sections(job_desc)
+    jd_all = normalize_text(sec["all"])
     jd_req = normalize_text(sec["required"])
     jd_nice = normalize_text(sec["nice"])
 
-    # 1) Canonicals from required first
+    # 1) Required canonicals
     required_skills = _extract_canonical_from_text(jd_req)
-
-    # 2) Parse bullet lines (often the most accurate signal)
-    for b in extract_bullets(sec["required"]):
-        for s in _expand_phrase_into_skills(b):
+    # Add canonicals found from required bullet/line splitting
+    for ln in extract_bullets_or_lines(sec["required"]):
+        for s in _expand_phrase_into_skills(ln):
             if s in SKILL_PATTERNS and s not in required_skills:
                 required_skills.append(s)
 
-    # 3) Nice-to-have canonicals after required
+    # 2) Nice canonicals
     nice_skills = []
     if jd_nice.strip():
         for s in _extract_canonical_from_text(jd_nice):
             if s not in required_skills and s not in nice_skills:
                 nice_skills.append(s)
-        for b in extract_bullets(sec["nice"]):
-            for s in _expand_phrase_into_skills(b):
+        for ln in extract_bullets_or_lines(sec["nice"]):
+            for s in _expand_phrase_into_skills(ln):
                 if s in SKILL_PATTERNS and s not in required_skills and s not in nice_skills:
                     nice_skills.append(s)
 
-    # 4) RAKE + TF-IDF for extra phrases (noise-controlled)
+    # 3) RAKE + TFIDF extras (noise-controlled)
     rake = Rake(
         stopwords=list(STOP_ALL),
         min_length=1,
@@ -393,9 +411,7 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 3
             if len(tfidf_terms) >= top_k:
                 break
 
-    # Merge order: required -> nice -> extras (expanded, de-noised)
-    out = []
-    seen = set()
+    out, seen = [], set()
 
     def add(x: str):
         x = _clean_skill(x)
@@ -406,12 +422,14 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 3
 
     for s in required_skills:
         add(s)
+    required_count = len(out)
+
     for s in nice_skills:
         add(s)
 
     for raw in rake_phrases + tfidf_terms:
         for s in _expand_phrase_into_skills(raw):
-            # prefer canonicals + short meaningful phrases only
+            # only add canonicals or short phrases (keeps RAKE from polluting)
             if s in SKILL_PATTERNS or len(s.split()) <= 2:
                 add(s)
             if len(out) >= top_k:
@@ -419,7 +437,11 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 3
         if len(out) >= top_k:
             break
 
-    return out[:top_k]
+    # ensure required_count not zero (fallback: treat all as required)
+    if required_count == 0:
+        required_count = min(len(out), max(1, JD_SKILL_DENOM_CAP))
+
+    return out[:top_k], required_count
 
 
 # ---------------- Experience parsing ----------------
@@ -466,8 +488,8 @@ def _parse_mon_yyyy(s: str):
 
 
 def estimate_experience_months(text_norm: str) -> int:
-    # explicit "X years/months" (if present, keep as minimum)
     months = 0
+
     y = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text_norm)
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b", text_norm)
     if y:
@@ -479,7 +501,6 @@ def estimate_experience_months(text_norm: str) -> int:
         if 0 <= mm <= 480:
             months = max(months, int(mm))
 
-    # date ranges: "08/2021 - Present"
     dash = r"(?:-|–|—|to)"
     present = r"(?:present|current|now)"
     pat = re.compile(
@@ -494,11 +515,9 @@ def estimate_experience_months(text_norm: str) -> int:
     for a, b in pat.findall(text_norm):
         a = a.strip().lower()
         b = b.strip().lower()
-
         start = _parse_mm_yyyy(a) or _parse_mon_yyyy(a)
         if not start:
             continue
-
         if re.fullmatch(present, b, flags=re.IGNORECASE):
             end = now_pair
         else:
@@ -540,14 +559,20 @@ def project_mentions(text_norm: str) -> int:
 
 
 # ---------------- Core scoring ----------------
-def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVectorizer, jd_skills: list[str]) -> dict:
-    # Denominator is top-N skills, which should be required-first based on extract_jd_skills()
-    denom = max(1, min(len(jd_skills), JD_SKILL_DENOM_CAP))
+def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVectorizer,
+                      jd_skills: list[str], required_count: int) -> dict:
+    # required skills are first in jd_skills
+    req_count = max(1, min(required_count, len(jd_skills)))
+    denom = min(req_count, JD_SKILL_DENOM_CAP) if PREFER_REQUIRED_DENOM else min(len(jd_skills), JD_SKILL_DENOM_CAP)
     denom_skills = jd_skills[:denom]
 
     matched = [s for s in denom_skills if _match_skill(s, resume_text_norm)]
     missing = [s for s in denom_skills if not _match_skill(s, resume_text_norm)]
-    coverage = len(matched) / denom
+    coverage = len(matched) / max(1, denom)
+
+    # optional visibility: nice-to-have matches (NOT counted in denom)
+    nice_skills = jd_skills[req_count:]
+    nice_matched = [s for s in nice_skills if _match_skill(s, resume_text_norm)][:8]
 
     jd_norm = normalize_text(job_desc)
     M = vectorizer.transform([jd_norm, resume_text_norm])
@@ -572,12 +597,14 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
     score = int(round(final * 100))
 
     reasons = [
-        f"Skills: {round(coverage*100,1)}% ({len(matched)}/{denom} JD skills).",
+        f"Skills: {round(coverage*100,1)}% ({len(matched)}/{denom} required JD skills).",
         f"Semantic: {round(sem*100,1)}%.",
         f"Experience: ~{exp_m_raw} months (relevance-adjusted: {int(round(exp_score*100))}%).",
         f"Projects: {project_mentions(resume_text_norm)}.",
-        f"Degree: {'Yes' if edu else 'No'}."
+        f"Degree: {'Yes' if edu else 'No'}.",
     ]
+    if nice_matched:
+        reasons.append(f"Nice-to-have matched: {', '.join(nice_matched)}.")
 
     return {
         "overall_score": score,
@@ -585,6 +612,7 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
         "exp_score": int(round(exp_score * 100)),
         "matched_must": matched[:8],
         "missing_must": missing[:8],
+        "matched_nice": nice_matched,
         "reasoning": " ".join(reasons),
     }
 
@@ -619,7 +647,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
                 "execution_id": execution_id,
                 "total_resumes": 0,
                 "strong_candidates": 0,
-                "strong_threshold": 70,
+                "strong_threshold": STRONG_MIN,
                 "ranking": [],
                 "insights": [
                     "No valid resumes found (all were empty/unreadable after extraction).",
@@ -642,11 +670,11 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
         )
         vectorizer.fit([normalize_text(job_description)] + [t for _, t in resumes])
 
-        jd_skills = extract_jd_skills(job_description, vectorizer, top_k=JD_SKILL_TOP_K)
+        jd_skills, required_count = extract_jd_skills(job_description, vectorizer, top_k=JD_SKILL_TOP_K)
 
         results = []
         for fname, text_norm in resumes:
-            c = compute_candidate(job_description, text_norm, vectorizer, jd_skills)
+            c = compute_candidate(job_description, text_norm, vectorizer, jd_skills, required_count)
             results.append({
                 "file_name": fname,
                 "overall_score": c["overall_score"],
@@ -654,6 +682,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
                 "exp_score": c["exp_score"],
                 "matched_must": c["matched_must"],
                 "missing_must": c["missing_must"],
+                "matched_nice": c.get("matched_nice", []),
                 "reasoning": c["reasoning"],
                 "rank": 0
             })
@@ -663,8 +692,8 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
             r["rank"] = i + 1
 
         scores = np.array([r["overall_score"] for r in results], dtype=float)
-        p80 = float(np.quantile(scores, 0.80)) if len(scores) else 70.0
-        strong_threshold = int(max(60, round(p80)))
+        p80 = float(np.quantile(scores, 0.80)) if len(scores) else float(STRONG_MIN)
+        strong_threshold = int(max(STRONG_MIN, round(p80)))
         strong_count = int((scores >= strong_threshold).sum()) if len(scores) else 0
 
         avg_sem = float(np.mean([r["semantic_similarity"] for r in results])) if results else 0.0
@@ -674,6 +703,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
             f"Avg semantic match: {avg_sem:.0f}%.",
             f"Files found: {files_found}, considered: {files_considered}, skipped: {len(skipped)}.",
             f"JD skills extracted: {', '.join(jd_skills[:12])}" + (" ..." if len(jd_skills) > 12 else ""),
+            f"Required skills used for coverage: {min(required_count, JD_SKILL_DENOM_CAP)} (cap: {JD_SKILL_DENOM_CAP}).",
         ]
         if skipped:
             insights.append(f"Skipped {len(skipped)} files (empty/unreadable text).")
