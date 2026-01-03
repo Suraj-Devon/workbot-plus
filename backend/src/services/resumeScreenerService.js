@@ -1,7 +1,8 @@
-const { execFile } = require('child_process');  // Changed from 'exec'
+const { execFile } = require('child_process');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../models/database');
+const fs = require('fs');
 
 /**
  * Screen resumes against job description
@@ -13,19 +14,12 @@ const db = require('../models/database');
 const screenResumes = async (filesPath, jobDescription, userId) => {
   return new Promise((resolve) => {
     try {
-      const pythonScript = path.join(
-        __dirname,
-        '../../ai_workers/resume_screener_bot.py'
-      );
+      const pythonScript = path.join(__dirname, '../../ai_workers/resume_screener_bot.py');
 
-      // Ensure temp dir exists (if used elsewhere)
+      // Ensure temp dir exists (optional; keeping your behavior)
       const tempDir = path.join(__dirname, '../../temp');
-      const fs = require('fs');
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
+      if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-      // Create an execution row first
       db.query(
         `INSERT INTO bot_executions (id, user_id, bot_type, status, created_at)
          VALUES ($1, $2, $3, $4, NOW())
@@ -35,34 +29,39 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
         .then(async ({ rows }) => {
           const executionId = rows[0].id;
 
-          // FIXED: execFile with args array (no shell, no quoting problems!)
-          const pythonArgs = [
-            pythonScript,     // script path
-            filesPath,        // upload dir
-            jobDescription,   // raw JD text (multiline/quotes SAFE)
-            executionId       // execution ID
-          ];
+          const pythonArgs = [pythonScript, filesPath, jobDescription, executionId];
 
-          console.log('Executing:', 'python', pythonArgs);  // logs args array
+          console.log('Executing (execFile):', 'python', pythonArgs);
+
+          // KEY FIX: increase timeout now that you process 228/300 files
+          // 15 minutes is a safe starting point on Render.
+          const TIMEOUT_MS = Number(process.env.RESUME_SCREENER_TIMEOUT_MS || 15 * 60 * 1000);
 
           execFile(
-            'python',  // command
-            pythonArgs, // args array (safe!)
-            { 
-              timeout: 120000, 
+            'python',
+            pythonArgs,
+            {
               cwd: path.dirname(pythonScript),
-              maxBuffer: 50 * 1024 * 1024  // 50MB for large outputs
+              timeout: TIMEOUT_MS,
+              maxBuffer: 50 * 1024 * 1024, // 50MB stdout buffer
             },
             async (error, stdout, stderr) => {
               try {
                 if (error) {
-                  console.error('Python error:', error.message);
-                  console.error('Stderr:', stderr);
+                  // This is the info you need to confirm timeout-kill vs real crash
+                  console.error('Python execFile error:', {
+                    message: error.message,
+                    code: error.code,
+                    signal: error.signal,
+                    killed: error.killed,
+                    timeoutMs: TIMEOUT_MS,
+                  });
+                  console.error('Python stderr:', stderr);
 
                   await db.query(
                     `UPDATE bot_executions
-                     SET status = $2
-                   WHERE id = $1`,
+                        SET status = $2
+                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -70,14 +69,20 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
                     success: false,
                     error: 'Screening failed',
                     message: stderr || error.message,
+                    meta: {
+                      code: error.code,
+                      signal: error.signal,
+                      killed: error.killed,
+                      timeoutMs: TIMEOUT_MS,
+                    },
                   });
                 }
 
                 if (!stdout) {
                   await db.query(
                     `UPDATE bot_executions
-                     SET status = $2
-                   WHERE id = $1`,
+                        SET status = $2
+                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -88,7 +93,6 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
                   });
                 }
 
-                // Parse Python output
                 let result;
                 try {
                   result = JSON.parse(stdout.trim());
@@ -97,8 +101,8 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
 
                   await db.query(
                     `UPDATE bot_executions
-                     SET status = $2
-                   WHERE id = $1`,
+                        SET status = $2
+                      WHERE id = $1`,
                     [executionId, 'failed']
                   );
 
@@ -109,38 +113,27 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
                   });
                 }
 
-                // Save to results table
                 await db.query(
                   `INSERT INTO results (id, execution_id, result_data, summary_text, created_at)
                    VALUES ($1, $2, $3, $4, NOW())`,
-                  [
-                    uuidv4(),
-                    executionId,
-                    result,
-                    result.summary || 'Screening complete',
-                  ]
+                  [uuidv4(), executionId, result, result.summary || 'Screening complete']
                 );
 
                 await db.query(
                   `UPDATE bot_executions
-                   SET status = $2
-                 WHERE id = $1`,
+                      SET status = $2
+                    WHERE id = $1`,
                   [executionId, 'completed']
                 );
 
-                console.log('Screening success:', result);
-                resolve({
-                  success: true,
-                  executionId,
-                  data: result,
-                });
+                resolve({ success: true, executionId, data: result });
               } catch (err) {
                 console.error('Service error:', err);
 
                 await db.query(
                   `UPDATE bot_executions
-                   SET status = $2
-                 WHERE id = $1`,
+                      SET status = $2
+                    WHERE id = $1`,
                   [executionId, 'failed']
                 );
 
@@ -155,19 +148,11 @@ const screenResumes = async (filesPath, jobDescription, userId) => {
         })
         .catch((error) => {
           console.error('Screening error (create execution):', error);
-          resolve({
-            success: false,
-            error: 'Internal error',
-            message: error.message,
-          });
+          resolve({ success: false, error: 'Internal error', message: error.message });
         });
     } catch (error) {
       console.error('Screening error:', error);
-      resolve({
-        success: false,
-        error: 'Internal error',
-        message: error.message,
-      });
+      resolve({ success: false, error: 'Internal error', message: error.message });
     }
   });
 };
