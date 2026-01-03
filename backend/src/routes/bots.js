@@ -10,116 +10,161 @@ const db = require('../models/database');
 const { botsLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
-
-// Apply rate limit to all /api/bots/* routes
 router.use(botsLimiter);
 
-// ===== UPDATED: DOCX + PDF + TXT + CSV support with extension fallback =====
-// Configure multer for file uploads
-const upload = multer({
-  dest: path.join(__dirname, '../../uploads'),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max (was 10MB)
+// Ensure uploads dir exists
+const uploadsDir = path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+/**
+ * Multer: Data Analyst uploads (CSV/JSON/JSONL/NDJSON)
+ * Keep limit aligned with frontend demo (10MB).
+ */
+const uploadDataAnalyst = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    const fileName = file.originalname.toLowerCase();
-    
-    // Check extension FIRST (most reliable for .docx)
-    const extOk = fileName.endsWith('.csv') || 
-                  fileName.endsWith('.pdf') || 
-                  fileName.endsWith('.txt') || 
-                  fileName.endsWith('.docx');
-    
+    const fileName = (file.originalname || '').toLowerCase();
+
+    const extOk =
+      fileName.endsWith('.csv') ||
+      fileName.endsWith('.json') ||
+      fileName.endsWith('.jsonl') ||
+      fileName.endsWith('.ndjson');
+
     if (!extOk) {
-      cb(new Error('Invalid file type. Only CSV, PDF, TXT, and DOCX allowed.'));
+      cb(new Error('Invalid file type. Only CSV, JSON, JSONL/NDJSON allowed.'));
       return;
     }
-    
-    // Also check MIME type (backup validation)
-    // Some browsers send odd MIME for .docx, so allow empty/octet-stream
+
+    // MIME is unreliable; extension is primary
+    cb(null, true);
+  },
+});
+
+/**
+ * Multer: Resume Screener uploads (PDF/TXT/DOCX)
+ * Keep your original 50MB setting here.
+ */
+const uploadResumeScreener = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  fileFilter: (req, file, cb) => {
+    const fileName = (file.originalname || '').toLowerCase();
+
+    const extOk =
+      fileName.endsWith('.pdf') ||
+      fileName.endsWith('.txt') ||
+      fileName.endsWith('.docx');
+
+    if (!extOk) {
+      cb(new Error('Invalid file type. Only PDF, TXT, and DOCX allowed.'));
+      return;
+    }
+
     const allowedMimes = [
-      'text/csv',
       'application/pdf',
       'text/plain',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/octet-stream', // fallback for .docx
-      '', // some browsers send empty MIME
+      'application/octet-stream',
+      '',
     ];
-    
+
     if (!allowedMimes.includes(file.mimetype)) {
-      // Log but allow anyway if extension is good
       console.warn(`Unusual MIME type for ${file.originalname}: ${file.mimetype}, but extension OK`);
     }
-    
+
     cb(null, true);
   },
 });
 
 /**
  * POST /api/bots/data-analyst
- * Analyze CSV data
+ * Analyze CSV/JSON/JSONL data
  */
-router.post('/data-analyst', authenticateToken, upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: 'No file uploaded',
-        message: 'Please upload a CSV file',
-      });
-    }
+router.post(
+  '/data-analyst',
+  authenticateToken,
+  uploadDataAnalyst.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'No file uploaded',
+          message: 'Please upload a CSV, JSON, or JSONL file',
+        });
+      }
 
-    if (!req.file.originalname.toLowerCase().endsWith('.csv')) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid file type',
-        message: 'Please upload a CSV file',
-      });
-    }
+      const original = (req.file.originalname || '').toLowerCase();
+      const extOk =
+        original.endsWith('.csv') ||
+        original.endsWith('.json') ||
+        original.endsWith('.jsonl') ||
+        original.endsWith('.ndjson');
 
-    const executionId = uuidv4();
+      if (!extOk) {
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid file type',
+          message: 'Please upload a CSV, JSON, or JSONL file',
+        });
+      }
 
-    await db.query(
-      `INSERT INTO bot_executions (id, user_id, bot_type, file_name, file_size_bytes, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [executionId, req.user.userId, 'data_analyst', req.file.originalname, req.file.size, 'processing']
-    );
+      const executionId = uuidv4();
 
-    const result = await dataAnalystService.analyzeData(req.file.path, req.user.userId);
-
-    if (!result.success) {
       await db.query(
-        `UPDATE bot_executions SET status = $1, error_message = $2 WHERE id = $3`,
-        ['failed', result.message, executionId]
+        `INSERT INTO bot_executions (id, user_id, bot_type, file_name, file_size_bytes, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+        [
+          executionId,
+          req.user.userId,
+          'data_analyst',
+          req.file.originalname,
+          req.file.size,
+          'processing',
+        ]
       );
-      fs.unlinkSync(req.file.path);
-      return res.status(500).json(result);
+
+      const result = await dataAnalystService.analyzeData(
+        req.file.path,
+        req.user.userId,
+        executionId
+      );
+
+      // cleanup upload
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      if (!result.success) {
+        return res.status(500).json(result);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Analysis complete',
+        executionId,
+        data: result.data,
+      });
+    } catch (error) {
+      console.error('Data analyst error:', error);
+
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      return res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        message: error.message,
+      });
     }
-
-    await db.query(
-      `UPDATE bot_executions SET status = $1, completed_at = NOW() WHERE id = $2`,
-      ['completed', executionId]
-    );
-
-    fs.unlinkSync(req.file.path);
-
-    res.status(200).json({
-      success: true,
-      message: 'Analysis complete',
-      executionId,
-      data: result.data,
-    });
-  } catch (error) {
-    console.error('Data analyst error:', error);
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: error.message,
-    });
   }
-});
+);
 
 /**
  * POST /api/bots/resume-screener
@@ -128,7 +173,7 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
 router.post(
   '/resume-screener',
   authenticateToken,
-  upload.array('files', 300), // INCREASED from 100 to 300
+  uploadResumeScreener.array('files', 300),
   async (req, res) => {
     try {
       console.log('Resume screener request:', {
@@ -137,7 +182,6 @@ router.post(
         userId: req.user.userId,
       });
 
-      // Validate files
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({
           success: false,
@@ -146,7 +190,6 @@ router.post(
         });
       }
 
-      // Validate job description
       if (!req.body.jobDescription || req.body.jobDescription.trim().length < 10) {
         req.files.forEach((f) => {
           if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
@@ -159,21 +202,15 @@ router.post(
       }
 
       const executionId = uuidv4();
-      const baseDir = path.join(__dirname, '../../uploads');
+      const baseDir = uploadsDir;
       const uploadDir = path.join(baseDir, executionId);
 
-      // Ensure directories exist
-      if (!fs.existsSync(baseDir)) {
-        fs.mkdirSync(baseDir, { recursive: true });
-      }
       if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
       }
 
-      // Move files to execution-specific folder (preserve original names)
       const movedFiles = [];
       for (const f of req.files) {
-        const ext = path.extname(f.originalname);
         const safeName = f.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
         const newPath = path.join(uploadDir, safeName);
 
@@ -183,14 +220,12 @@ router.post(
 
       console.log(`Moved ${movedFiles.length} files to ${uploadDir}:`, movedFiles);
 
-      // Record bot execution
       await db.query(
         `INSERT INTO bot_executions (id, user_id, bot_type, file_name, status, created_at)
          VALUES ($1, $2, $3, $4, $5, NOW())`,
         [executionId, req.user.userId, 'resume_screener', `${movedFiles.length} resumes`, 'processing']
       );
 
-      // Call service
       const result = await resumeScreenerService.screenResumes(
         uploadDir,
         req.body.jobDescription,
@@ -215,7 +250,6 @@ router.post(
         ['completed', executionId]
       );
 
-      // Cleanup after 1 hour
       setTimeout(() => {
         try {
           if (fs.existsSync(uploadDir)) {
@@ -231,7 +265,7 @@ router.post(
         strong: result.data?.strong_candidates,
       });
 
-      res.status(200).json({
+      return res.status(200).json({
         success: true,
         message: 'Screening complete',
         executionId,
@@ -240,14 +274,13 @@ router.post(
     } catch (error) {
       console.error('Resume screener CRASH:', error);
 
-      // Cleanup on error
       if (req.files) {
         req.files.forEach((f) => {
           if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
         });
       }
 
-      res.status(500).json({
+      return res.status(500).json({
         success: false,
         error: 'Internal server error',
         message: error.message,
@@ -270,13 +303,10 @@ router.get('/history', authenticateToken, async (req, res) => {
       [req.user.userId]
     );
 
-    res.status(200).json({
-      success: true,
-      history,
-    });
+    return res.status(200).json({ success: true, history });
   } catch (error) {
     console.error('History error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: 'Internal server error',
       message: error.message,
@@ -297,10 +327,7 @@ router.get('/result/:executionId', authenticateToken, async (req, res) => {
     );
 
     if (!execution) {
-      return res.status(404).json({
-        success: false,
-        error: 'Execution not found',
-      });
+      return res.status(404).json({ success: false, error: 'Execution not found' });
     }
 
     if (execution.user_id !== req.user.userId) {
@@ -317,13 +344,10 @@ router.get('/result/:executionId', authenticateToken, async (req, res) => {
     );
 
     if (!result && execution.status !== 'processing') {
-      return res.status(404).json({
-        success: false,
-        error: 'Results not found',
-      });
+      return res.status(404).json({ success: false, error: 'Results not found' });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       status: execution.status,
       data: result ? result.result_data : null,
@@ -331,7 +355,7 @@ router.get('/result/:executionId', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Get result error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: 'Internal server error',
       message: error.message,
