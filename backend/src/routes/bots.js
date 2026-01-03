@@ -7,25 +7,49 @@ const { authenticateToken } = require('../middleware/auth');
 const dataAnalystService = require('../services/dataAnalystService');
 const resumeScreenerService = require('../services/resumeScreenerService');
 const db = require('../models/database');
-const { botsLimiter } = require('../middleware/rateLimit'); // NEW
+const { botsLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
 // Apply rate limit to all /api/bots/* routes
 router.use(botsLimiter);
 
+// ===== UPDATED: DOCX + PDF + TXT + CSV support with extension fallback =====
 // Configure multer for file uploads
 const upload = multer({
   dest: path.join(__dirname, '../../uploads'),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max (was 10MB)
   fileFilter: (req, file, cb) => {
-    // Allow CSV for data analyst, PDF/TXT for resume screener
-    const allowedMimes = ['text/csv', 'application/pdf', 'text/plain'];
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only CSV, PDF, and TXT allowed.'));
+    const fileName = file.originalname.toLowerCase();
+    
+    // Check extension FIRST (most reliable for .docx)
+    const extOk = fileName.endsWith('.csv') || 
+                  fileName.endsWith('.pdf') || 
+                  fileName.endsWith('.txt') || 
+                  fileName.endsWith('.docx');
+    
+    if (!extOk) {
+      cb(new Error('Invalid file type. Only CSV, PDF, TXT, and DOCX allowed.'));
+      return;
     }
+    
+    // Also check MIME type (backup validation)
+    // Some browsers send odd MIME for .docx, so allow empty/octet-stream
+    const allowedMimes = [
+      'text/csv',
+      'application/pdf',
+      'text/plain',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/octet-stream', // fallback for .docx
+      '', // some browsers send empty MIME
+    ];
+    
+    if (!allowedMimes.includes(file.mimetype)) {
+      // Log but allow anyway if extension is good
+      console.warn(`Unusual MIME type for ${file.originalname}: ${file.mimetype}, but extension OK`);
+    }
+    
+    cb(null, true);
   },
 });
 
@@ -99,12 +123,12 @@ router.post('/data-analyst', authenticateToken, upload.single('file'), async (re
 
 /**
  * POST /api/bots/resume-screener
- * Screen resumes
+ * Screen resumes (increased to 300 files)
  */
 router.post(
   '/resume-screener',
   authenticateToken,
-  upload.array('files', 100),
+  upload.array('files', 300), // INCREASED from 100 to 300
   async (req, res) => {
     try {
       console.log('Resume screener request:', {
@@ -118,7 +142,7 @@ router.post(
         return res.status(400).json({
           success: false,
           error: 'No files uploaded',
-          message: 'Please upload at least one resume (PDF/TXT)',
+          message: 'Please upload at least one resume (PDF/TXT/DOCX)',
         });
       }
 

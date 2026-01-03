@@ -5,8 +5,8 @@ import { useAuth } from '../../../../context/AuthContext'
 import api from './../../../../lib/api'
 import toast from 'react-hot-toast'
 
-const MAX_FILE_MB = 5
-const MAX_FILES = 100
+const MAX_FILE_MB = 50
+const MAX_FILES = 300
 
 // Add DOCX support (browser MIME can vary, so also check extension)
 const ALLOWED_TYPES = [
@@ -259,7 +259,7 @@ export default function ResumeScreenerPage() {
                 </p>
                 <p className="text-2xl font-bold text-slate-900">{result.total_resumes}</p>
               </div>
-
+ 
               <div className="bg-white/90 border border-emerald-100 rounded-2xl p-5 shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-emerald-600 mb-1">
                   Strong candidates ({strongLabel})
