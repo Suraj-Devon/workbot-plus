@@ -5,7 +5,8 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../models/database');
 
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
-const TIMEOUT_MS = Number(process.env.DATA_ANALYST_TIMEOUT_MS || 60000);
+const TIMEOUT_MS = Number(process.env.DATA_ANALYST_TIMEOUT_MS || 300000);
+
 
 // Keep for backwards compatibility (not used by spawn, but keep env contract)
 const MAX_BUFFER_BYTES = Number(process.env.DATA_ANALYST_MAX_BUFFER || 10 * 1024 * 1024); // 10MB
