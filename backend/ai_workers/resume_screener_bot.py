@@ -17,18 +17,17 @@ from sklearn.metrics.pairwise import cosine_similarity
 from rake_nltk import Rake
 
 
-# ---------------- Config (safe defaults) ----------------
+# ---------------- Config ----------------
 MAX_RESUMES = int(os.getenv("MAX_RESUMES", "300"))
 TOP_N_RANKING = int(os.getenv("TOP_N_RANKING", "25"))
 MIN_RESUME_CHARS = int(os.getenv("MIN_RESUME_CHARS", "50"))
 
-# Optional knobs
 JD_SKILL_TOP_K = int(os.getenv("JD_SKILL_TOP_K", "25"))
-JD_SKILL_DENOM_CAP = int(os.getenv("JD_SKILL_DENOM_CAP", "10"))  # score considers up to 10 JD skills
+JD_SKILL_DENOM_CAP = int(os.getenv("JD_SKILL_DENOM_CAP", "10"))
 MAX_MONTHS_CAP = int(os.getenv("MAX_MONTHS_CAP", "480"))
 
 
-# ---------------- NLTK bootstrap (stopwords only) ----------------
+# ---------------- NLTK bootstrap ----------------
 try:
     nltk.data.find("corpora/stopwords")
 except LookupError:
@@ -49,7 +48,6 @@ def extract_text_from_file(file_path: str) -> str:
             return "\n".join([para.text for para in d.paragraphs if para.text]) or ""
 
         if p.endswith(".pdf"):
-            # Fallback chain: PyMuPDF -> pdfplumber -> PyPDF2
             try:
                 import fitz  # PyMuPDF
                 doc = fitz.open(file_path)
@@ -94,23 +92,18 @@ def extract_text_from_file(file_path: str) -> str:
 def normalize_text(t: str) -> str:
     t = (t or "").lower()
 
-    # normalize common variants
+    # common variants / OCR-ish fixes
     t = re.sub(r"\bpower\s*bi\b", "power bi", t)
+    t = re.sub(r"\bpower\s*bl\b", "power bi", t)  # IMPORTANT: l->i confusion
+
     t = re.sub(r"\bms\s*excel\b", "excel", t)
     t = re.sub(r"\bmicrosoft\s*excel\b", "excel", t)
+
     t = re.sub(r"\bpostgre\s*sql\b", "postgresql", t)
     t = re.sub(r"\bpostgre\b", "postgresql", t)
     t = re.sub(r"\bsql\s*server\b", "sql server", t)
 
-    t = re.sub(r"\bnode\.?\s*js\b", "node js", t)
-    t = re.sub(r"\breact\.?\s*js\b", "react js", t)
-    t = re.sub(r"\brest\s*api(s)?\b", "rest api", t)
-    t = re.sub(r"\bfull[-\s]*stack\b", "full stack", t)
-
-    # normalize dashes
     t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", t)
-
-    # collapse whitespace
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -144,7 +137,7 @@ def build_stopwords():
         "analyze", "analyzing", "analysis", "work", "working", "manage", "managed", "managing",
         "ability", "able",
         "summary", "objective", "profile", "education", "projects", "project", "certification", "certifications",
-        "contact", "email", "phone", "address"
+        "contact", "email", "phone", "address",
     }
     return base.union(domain)
 
@@ -156,7 +149,7 @@ STOP_ALL = build_stopwords()
 SKILL_PATTERNS = {
     "excel": r"\bexcel\b",
     "sql": r"\bsql\b",
-    "power bi": r"\bpower\s*bi\b",
+    "power bi": r"\bpower\s*bi\b|\bpower\s*bl\b",
     "tableau": r"\btableau\b",
     "python": r"\bpython\b",
     "pandas": r"\bpandas\b",
@@ -170,30 +163,44 @@ SKILL_PATTERNS = {
     "sql server": r"\bsql\s*server\b|\bssrs\b",
 }
 
+CANONICAL_ORDER = [
+    "excel", "sql", "power bi", "tableau", "python", "pandas",
+    "data cleaning", "dashboard", "etl", "a/b testing", "experiments",
+    "sql server", "bigquery", "numpy",
+]
 
-def _match_canonical(skill: str, text_norm: str) -> bool:
+
+def _match_skill(skill: str, text_norm: str) -> bool:
     pat = SKILL_PATTERNS.get(skill)
-    if not pat:
-        return phrase_in_text(skill, text_norm)
-    return re.search(pat, text_norm) is not None
+    if pat:
+        return re.search(pat, text_norm) is not None
+    return phrase_in_text(skill, text_norm)
 
 
 def _extract_canonical_from_text(text_norm: str) -> list[str]:
-    out = []
-    for s, pat in SKILL_PATTERNS.items():
-        if re.search(pat, text_norm):
-            out.append(s)
-    return out
+    found = []
+    for s in CANONICAL_ORDER:
+        if re.search(SKILL_PATTERNS[s], text_norm):
+            found.append(s)
+    return found
 
 
 def _clean_skill(s: str) -> str:
     s = normalize_text(s)
     s = re.sub(r"[^a-z0-9+\-# ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    # remove useless numeric-only tokens
     if not s or re.fullmatch(r"\d+", s):
         return ""
     return s
+
+
+def _canonicals_in_phrase(phrase: str) -> list[str]:
+    phrase = normalize_text(phrase)
+    hits = []
+    for s in CANONICAL_ORDER:
+        if re.search(SKILL_PATTERNS[s], phrase):
+            hits.append(s)
+    return hits
 
 
 def _expand_phrase_into_skills(phrase: str) -> list[str]:
@@ -201,40 +208,47 @@ def _expand_phrase_into_skills(phrase: str) -> list[str]:
     if not phrase:
         return []
 
-    # drop “data analyst 2” style artifacts
-    if re.search(r"\bdata\s+analyst\b", phrase) and re.search(r"\b\d+\b", phrase):
-        phrase = re.sub(r"\b\d+\b", "", phrase).strip()
+    # remove "data analyst 2" artifacts
+    phrase = re.sub(r"\bdata\s+analyst\s+\d+\b", "data analyst", phrase).strip()
 
-    # split on separators
-    parts = re.split(r"\s*(?:,|/|&|\band\b|\bor\b|\(|\)|:|;|\||\+)\s*", phrase)
-    parts = [p.strip() for p in parts if p and p.strip()]
+    canon_hits = _canonicals_in_phrase(phrase)
+    # If phrase contains multiple canonical skills, keep ONLY canonicals (prevents "excel sql power bi" polluting denom)
+    if len(canon_hits) >= 2:
+        return canon_hits
+
+    # allow a few meaningful 2-word/3-word phrases
+    allowed_phrases = {"data analyst", "data cleaning", "a/b testing"}
 
     out = []
+    if phrase in allowed_phrases:
+        out.append(phrase)
+
+    # split on separators into smaller pieces
+    parts = re.split(r"\s*(?:,|/|&|\band\b|\bor\b|\(|\)|:|;|\||\+)\s*", phrase)
+    parts = [p.strip() for p in parts if p and p.strip()]
     for p in parts:
         p = _clean_skill(p)
         if not p:
             continue
-        out.append(p)
+        # keep only short phrases to reduce noise
+        if len(p.split()) <= 2 or p in allowed_phrases:
+            out.append(p)
 
-    # If phrase still contains multiple known canonicals, extract them too
-    canonicals = []
-    for s in SKILL_PATTERNS.keys():
-        if s in phrase:
-            canonicals.append(s)
+    # also add single canonical if present
+    if len(canon_hits) == 1 and canon_hits[0] not in out:
+        out.insert(0, canon_hits[0])
 
-    # de-dupe while preserving order
+    # de-dupe
     merged = []
     seen = set()
-    for x in canonicals + out + [phrase]:
+    for x in out:
         x = _clean_skill(x)
         if not x or x in seen:
             continue
-        # avoid very generic junk terms
         if x in {"data", "analyst", "years", "experience"}:
             continue
         merged.append(x)
         seen.add(x)
-
     return merged
 
 
@@ -242,10 +256,10 @@ def _expand_phrase_into_skills(phrase: str) -> list[str]:
 def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 25) -> list[str]:
     jd_norm = normalize_text(job_desc)
 
-    # 1) deterministic “canonical” skills from JD
-    seed = _extract_canonical_from_text(jd_norm)
+    # 1) canonical skills always first (stable, predictable)
+    canonical = _extract_canonical_from_text(jd_norm)
 
-    # 2) RAKE phrases (good for multi-word keywords)
+    # 2) RAKE phrases
     rake = Rake(
         stopwords=list(STOP_ALL),
         min_length=1,
@@ -255,7 +269,7 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
         word_tokenizer=simple_word_tokenizer,
     )
     rake.extract_keywords_from_text(jd_norm)
-    rake_phrases = [p.strip() for p in rake.get_ranked_phrases() if len(p.strip()) >= 3]
+    rake_phrases = [p.strip() for p in rake.get_ranked_phrases() if len(p.strip()) >= 3]  # RAKE returns key phrases [web:595]
 
     # 3) TF-IDF terms
     v = vectorizer.transform([jd_norm])
@@ -273,28 +287,32 @@ def extract_jd_skills(job_desc: str, vectorizer: TfidfVectorizer, top_k: int = 2
             if len(tfidf_terms) >= top_k:
                 break
 
-    # Merge + expand phrases into matchable skills
-    merged = []
+    # Merge, but keep canonicals prioritized and keep noise out
+    out = []
     seen = set()
 
-    for raw in seed + rake_phrases + tfidf_terms:
+    def add_skill(s: str):
+        s = _clean_skill(s)
+        if not s or s in seen:
+            return
+        out.append(s)
+        seen.add(s)
+
+    for s in canonical:
+        add_skill(s)
+
+    for raw in rake_phrases + tfidf_terms:
         for s in _expand_phrase_into_skills(raw):
-            if not s or s in seen:
-                continue
-            # remove numeric-only and ultra-generic
-            if re.fullmatch(r"\d+", s):
-                continue
-            merged.append(s)
-            seen.add(s)
-            if len(merged) >= top_k:
+            add_skill(s)
+            if len(out) >= top_k:
                 break
-        if len(merged) >= top_k:
+        if len(out) >= top_k:
             break
 
-    return merged[:top_k]
+    return out[:top_k]
 
 
-# ---------------- Experience / signals ----------------
+# ---------------- Experience parsing ----------------
 MONTHS = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -338,11 +356,10 @@ def _parse_mon_yyyy(s: str):
 
 
 def estimate_experience_months(text_norm: str) -> int:
-    # 1) detect explicit “X years/months”
+    # explicit "X years/months"
     months = 0
     y = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text_norm)
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b", text_norm)
-
     if y:
         years = float(y.group(1))
         if 0 <= years <= 40:
@@ -352,9 +369,7 @@ def estimate_experience_months(text_norm: str) -> int:
         if 0 <= mm <= 480:
             months = max(months, int(mm))
 
-    # 2) date-range parsing (sum of ranges)
-    # handles: 08/2021 - Present, 10/2019 – 07/2021, etc.
-    ranges = []
+    # date ranges "08/2021 - Present"
     dash = r"(?:-|–|—|to)"
     present = r"(?:present|current|now)"
     pat = re.compile(
@@ -365,29 +380,37 @@ def estimate_experience_months(text_norm: str) -> int:
     now = datetime.utcnow()
     now_pair = (now.year, now.month)
 
+    # collect intervals, then merge overlaps (prevents double-counting)
+    intervals = []
     for a, b in pat.findall(text_norm):
         a = a.strip().lower()
         b = b.strip().lower()
-
         start = _parse_mm_yyyy(a) or _parse_mon_yyyy(a)
         if not start:
             continue
-
         if re.fullmatch(present, b, flags=re.IGNORECASE):
             end = now_pair
         else:
             end = _parse_mm_yyyy(b) or _parse_mon_yyyy(b)
-
         if not end:
             continue
-
         s_idx = _to_month_index(start[0], start[1])
         e_idx = _to_month_index(end[0], end[1])
         if e_idx >= s_idx:
-            ranges.append(e_idx - s_idx + 1)
+            intervals.append((s_idx, e_idx))
 
-    if ranges:
-        months = max(months, int(sum(ranges)))
+    if intervals:
+        intervals.sort()
+        merged = []
+        cur_s, cur_e = intervals[0]
+        for s, e in intervals[1:]:
+            if s <= cur_e + 1:
+                cur_e = max(cur_e, e)
+            else:
+                merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        merged.append((cur_s, cur_e))
+        months = max(months, sum((e - s + 1) for s, e in merged))
 
     return int(min(max(months, 0), MAX_MONTHS_CAP))
 
@@ -406,27 +429,22 @@ def project_mentions(text_norm: str) -> int:
 
 # ---------------- Core scoring ----------------
 def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVectorizer, jd_skills: list[str]) -> dict:
-    matched = []
-    missing = []
-
-    for s in jd_skills:
-        if _match_canonical(s, resume_text_norm):
-            matched.append(s)
-        else:
-            missing.append(s)
-
     denom = max(1, min(len(jd_skills), JD_SKILL_DENOM_CAP))
-    coverage = len(matched[:denom]) / denom
+    denom_skills = jd_skills[:denom]
+
+    matched = [s for s in denom_skills if _match_skill(s, resume_text_norm)]
+    missing = [s for s in denom_skills if not _match_skill(s, resume_text_norm)]
+
+    coverage = len(matched) / denom
 
     jd_norm = normalize_text(job_desc)
     M = vectorizer.transform([jd_norm, resume_text_norm])
-    sem = float(cosine_similarity(M[0], M[1])[0][0]) if M.shape[1] else 0.0
+    sem = float(cosine_similarity(M[0], M[1])[0][0]) if M.shape[1] else 0.0  # cosine on TF-IDF [web:612]
 
     exp_m_raw = estimate_experience_months(resume_text_norm)
     exp_score_raw = min(exp_m_raw / 36.0, 1.0)
 
-    relevance = max(coverage, sem)
-    relevance = min(1.0, max(0.0, relevance))
+    relevance = min(1.0, max(0.0, max(coverage, sem)))
     exp_score = exp_score_raw * relevance
 
     proj_score = min(project_mentions(resume_text_norm) / 5.0, 1.0)
@@ -439,13 +457,10 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
         0.05 * proj_score +
         0.02 * edu
     )
-    score = round(final * 100, 1)
-
-    matched_top = matched[:8]
-    missing_top = missing[:8]
+    score = int(round(final * 100))
 
     reasons = [
-        f"Skills: {round(coverage*100,1)}% ({len(matched[:denom])}/{denom} JD skills).",
+        f"Skills: {round(coverage*100,1)}% ({len(matched)}/{denom} JD skills).",
         f"Semantic: {round(sem*100,1)}%.",
         f"Experience: ~{exp_m_raw} months (relevance-adjusted: {int(round(exp_score*100))}%).",
         f"Projects: {project_mentions(resume_text_norm)}.",
@@ -453,11 +468,11 @@ def compute_candidate(job_desc: str, resume_text_norm: str, vectorizer: TfidfVec
     ]
 
     return {
-        "overall_score": int(round(score)),
+        "overall_score": score,
         "semantic_similarity": round(sem * 100, 1),
         "exp_score": int(round(exp_score * 100)),
-        "matched_must": matched_top,
-        "missing_must": missing_top,
+        "matched_must": matched[:8],
+        "missing_must": missing[:8],
         "reasoning": " ".join(reasons),
     }
 
@@ -497,7 +512,6 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
                 "insights": [
                     "No valid resumes found (all were empty/unreadable after extraction).",
                     f"Files found: {files_found}, considered: {files_considered}, skipped: {len(skipped)}.",
-                    f"Skipped sample: {', '.join(skipped[:10])}" + (" ..." if len(skipped) > 10 else "")
                 ],
                 "summary": "No valid resumes found",
                 "files_found": files_found,
@@ -547,7 +561,7 @@ def screen_resumes(upload_dir: str, job_description: str, execution_id: str) -> 
             f"AI screened {len(results)} resumes using RAKE skill phrases + TF-IDF similarity.",
             f"Avg semantic match: {avg_sem:.0f}%.",
             f"Files found: {files_found}, considered: {files_considered}, skipped: {len(skipped)}.",
-            f"JD skills extracted: {', '.join(jd_skills[:12])}" + (" ..." if len(jd_skills) > 12 else "")
+            f"JD skills extracted: {', '.join(jd_skills[:12])}" + (" ..." if len(jd_skills) > 12 else ""),
         ]
         if skipped:
             insights.append(f"Skipped {len(skipped)} files (empty/unreadable text).")
