@@ -7,6 +7,8 @@ const authRoutes = require('./src/routes/auth');
 const botsRoutes = require('./src/routes/bots');
 
 const app = express();
+app.set('trust proxy', 1);
+
 
 // Security & CORS
 app.use(helmet());
